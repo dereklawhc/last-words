@@ -1,6 +1,6 @@
 {
   "name": "last-words",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Claude-managed compaction: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files.",
   "author": {
     "name": "Derek Law"
@@ -31,6 +31,16 @@
       "type": "boolean",
       "title": "Pre-compact snapshots",
       "description": "Before each compaction, archive the full transcript as its own session in claude --resume, with copies of the handoff files. Off unless turned on here or with LAST_WORDS_SNAPSHOT=1."
+    },
+    "snapshot_keep": {
+      "type": "number",
+      "title": "Snapshots to keep per session",
+      "description": "When snapshots are on, keep this many of each session's newest snapshots and delete older ones. 0 keeps all. Leave empty for the default, 10."
+    },
+    "idle_handoff": {
+      "type": "boolean",
+      "title": "Handoff before idle compaction",
+      "description": "When Claude Code's idle compaction is about to run, call it off and ask Claude to write a handoff and request compaction instead, while the prompt cache is still warm. On unless turned off here or with LAST_WORDS_IDLE_HANDOFF=0."
     }
   }
 }

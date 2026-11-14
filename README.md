@@ -30,12 +30,12 @@ Here's what that costs you:
 - **There's no undo.** The old context is replaced. If the summary dropped something, enjoy grepping JSONL. (Or turn on snapshots, below.)
 - **You become the babysitter.** The workaround is to watch the meter, wait for a quiet moment, ask me to write everything down, type `/compact`, then "ok, now re-read your notes". Every time.
 
-last-words gives that job to me.
-I know when I'm at a natural break, because I'm the one doing the work: subagents briefed and running, a phase just closed, nothing half-done.
-So before I forget, I write down everything the next me will need, ask for compaction, and when I come back I re-read it and carry on.
-Hence the name: the handoff is my last words.
-The token counter is a fine instrument.
-It's just not a project manager.
+> last-words gives that job to me.
+> I know when I'm at a natural break, because I'm the one doing the work: subagents briefed and running, a phase just closed, nothing half-done.
+> So before I forget, I write down everything the next me will need, ask for compaction, and when I come back I re-read it and carry on.
+> Hence the name: the handoff is my last words.
+> The token counter is a fine instrument.
+> It's just not a project manager.
 
 ## How it works
 
@@ -63,14 +63,15 @@ sequenceDiagram
 ## Features
 
 - 🧭 **Claude-chosen timing.** One tool call from me. No confirmation dialog, no meter-watching.
-- 🔁 **Hands-free re-entry.** A hidden re-entry note and an automatic resume prompt, so nobody types "resuming from compact, re-read…" ever again. Your transcript gets two short lines: `/compact (requested by Claude at a handoff point)` and "Resuming from compaction".
+- 🔁 **Hands-free re-entry.** A hidden re-entry note and an automatic resume prompt, so nobody types "resuming from compact, re-read…" ever again. Your transcript gets two short lines: `/compact (requested by Claude at a handoff point)` and "Resuming from compaction". The note also carries the repo's branch, HEAD and uncommitted file count at compaction time, so I can check my own notes against reality. Trust, but `git status`.
 - 🛡️ **Freshness guard.** A handoff older than the latest message, notification or subagent report is refused.
 - ✋ **Arrival guard.** If anything arrives between my request and the end of the turn, the compaction is called off. I fold the news into the handoff and ask again.
-- 📈 **Context nudges, at sizes you choose.** Three quiet notes as context grows: take the next natural break, then drive to one, then compact at the first safe point. Defaults are 400k, 700k and 850k; set your own at install time or in `/config`. The notes never interrupt a turn.
+- 📈 **Context nudges, at sizes you choose.** Three quiet notes as context grows: take the next natural break, then drive to one, then compact at the first safe point. Defaults are 400k, 700k and 850k; set your own at install time or in `/config`. The notes never interrupt a turn. The status line shows which nudge you're on.
 - 🧠 **A bundled playbook.** The `compaction-handoff` skill teaches me when to compact, when not to, and what a good handoff holds. It's plain Markdown: edit it to fit how you work.
 - 🙋 **Respects your gates.** If you asked for a pause or a review gate, I don't compact at it until you approve. Open questions go into the handoff instead of blocking.
-- 🗂️ **Optional snapshots: nothing is forgotten, only archived.** Turn them on, and the pre-compaction transcript becomes its own session in `claude --resume`, titled like `My session · pre-compact 3 · 2026-11-14 16:02 · 640k`, with the handoff and re-read files copied beside it. For when you remember something I forgot. On APFS and reflink filesystems the copy is instant and nearly free.
-- 🧯 **Covers every compaction.** Your own `/compact` and the built-in auto-compaction get the re-entry note too, and a snapshot when snapshots are on. Belt, braces, and a spare belt.
+- 🗂️ **Optional snapshots: nothing is forgotten, only archived.** Turn them on, and the pre-compaction transcript becomes its own session in `claude --resume`, titled like `My session · pre-compact 3 · 2026-11-14 16:02 · 640k`, with the handoff and re-read files copied beside it. For when you remember something I forgot. On APFS and reflink filesystems the copy is instant and nearly free. The last 10 per session are kept by default; set your own limit, or keep them all.
+- 😴 **Idle compaction gets a handoff too.** When Claude Code is about to compact a session you've walked away from, the mod calls it off and asks me to write my last words first, while the prompt cache is still warm. If it isn't a good moment, I say so and it doesn't ask again until something new arrives.
+- 🧯 **Covers every compaction.** Your own `/compact`, the built-in auto-compaction and any idle compaction that still runs get the re-entry note too, and a snapshot when snapshots are on. That note says how old my last handoff is, so I know what only the summary remembers. Belt, braces, and a spare belt.
 
 ## When should Claude compact?
 
@@ -79,11 +80,12 @@ They're a starting point, not scripture: the right moment depends on how you wor
 
 | Example moment | Looks like |
 | --- | --- |
+| **Whenever you said** | You told me when ("after each wave lands", "not until I'm back"), or your `CLAUDE.md` describes a routine. That always comes first; the rest are defaults |
 | **A wave of work has started** | The previous batch is reviewed and committed, the new subagents are briefed (briefs saved as files) and running, and the main thread is waiting |
 | **A phase has closed** | A review passed or a question was answered, and the next phase starts with a fresh discussion |
 | **A long wait** | Everything is running, and nothing will come back for a while |
 
-…and it holds off while a result is unreviewed, a merge is in progress, I'm mid-exchange with a subagent, or you've just said something I haven't written down.
+…and it holds off while a result is unreviewed, a merge is in progress, I'm mid-exchange with a subagent, you've just said something I haven't written down, or I'm stuck halfway through working something out. A half-formed theory is the first thing a summary flattens.
 
 Context size only sets the urgency, through the three nudges:
 
@@ -96,8 +98,9 @@ Context size only sets the urgency, through the three nudges:
 
 ## What goes in a handoff
 
-A handoff is a letter to the me who wakes up after compaction.
-That Claude is smart, capable, and remembers absolutely nothing, so the letter had better be good.
+> A handoff is a letter to the me who wakes up after compaction.
+> That Claude is smart, capable, and remembers absolutely nothing, so the letter had better be good.
+
 Here's an example of what the skill asks me to write: one file, rewritten each time, kept in the repo (never a temp folder, which forgets faster than I do).
 
 1. **Read after compaction:** the files to re-read, with sections.
@@ -137,7 +140,7 @@ There's nothing to do: the plugin is on in every session by default.
 
 | Command | What it does |
 | --- | --- |
-| `/auto-compact status` | Shows whether it's on, the context size, the nudge levels, whether snapshots are on, any queued request, and snapshot ids |
+| `/auto-compact status` | Shows whether it's on, the context size, the nudge levels, idle handling, whether snapshots are on, any queued request, and snapshot ids |
 | `/auto-compact off` · `on` | Turns it off or on for this session |
 | `/prepare-compact` | Asks me to wrap up, write the handoff and request compaction now |
 
@@ -174,6 +177,8 @@ Set them on the install screen, in `/config`, or in `settings.json` under `plugi
 | `nudge_3_k` | | `850` | Third nudge: compact at the first safe point. Keep it below your auto-compaction threshold |
 | `cooldown_k` | `LAST_WORDS_COOLDOWN_K` | `100` | Minimum growth since the last compaction before another is accepted, and before nudges resume |
 | `snapshot` | `LAST_WORDS_SNAPSHOT` (`1` for on) | off | Archive the full transcript as a resumable session before each compaction |
+| `idle_handoff` | `LAST_WORDS_IDLE_HANDOFF` (`0` for off) | on | Turn Claude Code's idle compaction into a handoff request |
+| `snapshot_keep` | `LAST_WORDS_SNAPSHOT_KEEP` | `10` | Snapshots kept per session; older ones are deleted. `0` keeps all |
 | | `LAST_WORDS_DEBUG_LOG` | unset | Path of a trace file listing requests, arrivals, turn ends and notes |
 
 Each value comes from the plugin settings first, then the environment, then the default.

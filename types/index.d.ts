@@ -34,6 +34,8 @@ export type HcState = {
   nudgeLevel: number
   snapshots: string[]
   transcriptPath?: string
+  /** `$.clock.now()` when the mod last asked for a handoff in place of an idle compaction; 0 for never. */
+  idleAskAt: number
 }
 
 /** The last inbound prompt, notification or message; kept apart from HcState so its writes never race the request's. */
@@ -43,8 +45,15 @@ export type HcInbound = {
   what?: string
 }
 
+/** The main loop's turns, written only by the turn hooks. */
+export type HcTurns = {
+  running: boolean
+  /** `$.clock.now()` when the last main-loop turn ended; 0 for none yet. */
+  endedAt: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'last-words': { s: Shaped<HcState>; inbound: Shaped<HcInbound> }
+    'last-words': { s: Shaped<HcState>; inbound: Shaped<HcInbound>; turns: Shaped<HcTurns> }
   }
 }

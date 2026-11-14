@@ -11,13 +11,14 @@ The user's explicit instructions always win over this protocol.
 
 ## When to compact
 
-1. **Default: a build wave has started.**
+1. **First: what the user asked for.** If the user has said when to compact ("compact after each wave lands", "compact once this PR merges", "not until I'm back", "prepare for compact now"), or their `CLAUDE.md` or memory describes a compaction routine, follow it. Use the moments below only when they have expressed nothing.
+2. **Default: a build wave has started.**
    - The previous wave's results are reviewed and committed.
    - Every brief of the current wave is a file, written before its agent started.
    - The current wave's agents are running and the main thread is waiting.
    - Briefs for later waves that need the full history are drafted, as files.
-2. **A phase has closed.** The user approved its review gate, or a research question is answered, and the next phase opens with a new discussion. Use `after: "discuss"`.
-3. **A long wait.** Everything is running and nothing will come back for a while.
+3. **A phase has closed.** The user approved its review gate, or a research question is answered, and the next phase opens with a new discussion. Use `after: "discuss"`.
+4. **A long wait.** Everything is running and nothing will come back for a while.
 
 ## When not to compact
 
@@ -25,6 +26,7 @@ The user's explicit instructions always win over this protocol.
 - A merge is in progress.
 - You are mid-exchange with a subagent or another session.
 - The user has just given an instruction that is not yet written to disk.
+- You are stuck or mid-derivation: chasing a failure you have not explained, halfway through reasoning out a design, or about to try the next fix. The working theory lives only in your context and a summary flattens it. Reach a resolved step first. If urgency forces compaction anyway, write the open line of reasoning into the handoff: what you tried, what you ruled out, and the current hypothesis.
 - **The compaction point is a pause or blocking review gate the user asked for.** Do not compact until the user approves the gate. Once they approve, the phase has closed and compacting is natural.
 - If work remains before such a pause or gate, compacting first is fine. After re-reading, work up to the gate and stop there.
 
@@ -67,6 +69,11 @@ It holds, in this order:
 6. **Environment.** Servers and ports, worktrees and branches, other sessions working on the same repo, outside resources such as GPU pods and how to reach them.
 7. **Next steps.** What to do after re-reading, matching the `after` mode.
 
+## When the mod asks after an idle spell
+
+Claude Code compacts an idle session shortly before its prompt cache expires. The mod calls that off and asks you for a handoff instead, with "Idle: preparing a handoff before compaction (note above)."
+Treat it like any other compaction point: if one of the moments above holds and nothing in "When not to compact" applies, rewrite the handoff and request compaction, usually with `after: "wait"`, since the user is away. If it does not, say why in one line and end your turn; the mod will not ask again until something new arrives.
+
 ## Calling request_compaction
 
 - Rewrite the handoff after the last thing that arrived. The mod refuses a handoff modified before the latest prompt, notification or message.
@@ -79,9 +86,10 @@ It holds, in this order:
 
 ## After compaction
 
-For a compaction you requested, the mod adds the re-entry note as a hidden message and starts your next turn with "Resuming from compaction (re-entry note above)." For one you did not request (the user's `/compact`, auto-compaction), the note follows the summary.
+For a compaction you requested, the mod adds the re-entry note as a hidden message and starts your next turn with "Resuming from compaction (re-entry note above)." For one you did not request (the user's `/compact`, auto-compaction, idle compaction), the note follows the summary and says how old the handoff on record is; anything after it is only in the summary.
+The note also states the repo's branch, HEAD and uncommitted file count at compaction time.
 
 1. Re-read the handoff in full and the listed files at the listed scope before acting on anything, including subagent notifications that arrived meanwhile.
-2. Check the running agents' state (their output files) against the handoff.
+2. Check the handoff against the repo state in the note and the running agents' state (their output files). Where they disagree, trust the repo and the files.
 3. Ask the user again any open questions the handoff lists.
 4. Proceed as the `after` mode says.
