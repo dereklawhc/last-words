@@ -1,0 +1,5 @@
+{
+  "name": "last-words",
+  "owner": { "name": "Derek Law" },
+  "plugins": [{ "name": "last-words", "source": "./" }]
+}

@@ -1,0 +1,36 @@
+{
+  "name": "last-words",
+  "version": "0.2.0",
+  "description": "Claude-managed compaction: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files.",
+  "author": {
+    "name": "Derek Law"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "nudge_1_k": {
+      "type": "number",
+      "title": "First nudge (thousands of tokens)",
+      "description": "Context size at which Claude is told to take the next natural handoff point. Leave empty for the default, 400."
+    },
+    "nudge_2_k": {
+      "type": "number",
+      "title": "Second nudge (thousands of tokens)",
+      "description": "Context size at which Claude is told to drive to a handoff point. Leave empty for the default, 700."
+    },
+    "nudge_3_k": {
+      "type": "number",
+      "title": "Third nudge (thousands of tokens)",
+      "description": "Context size at which Claude is told to compact at the first safe point. Keep it below your auto-compaction threshold. Leave empty for the default, 850."
+    },
+    "cooldown_k": {
+      "type": "number",
+      "title": "Cooldown (thousands of tokens)",
+      "description": "Minimum context growth since the last compaction before Claude may request another, and before nudges resume. Leave empty for the default, 100."
+    },
+    "snapshot": {
+      "type": "boolean",
+      "title": "Pre-compact snapshots",
+      "description": "Before each compaction, archive the full transcript as its own session in claude --resume, with copies of the handoff files. Off unless turned on here or with LAST_WORDS_SNAPSHOT=1."
+    }
+  }
+}
