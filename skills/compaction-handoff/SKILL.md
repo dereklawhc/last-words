@@ -78,6 +78,8 @@ Treat it like any other compaction point: if one of the moments above holds and 
 
 - Rewrite the handoff after the last thing that arrived. The mod refuses a handoff modified before the latest prompt, notification or message.
 - Pass `handoff`, `reread` (path, scope, why), `after` and `next`; `focus` only when the summary should stress something the handoff cannot hold.
+- `reread` lists every file the handoff's reading section names, at the same scope; leave the handoff itself out, since it is always read first.
+- `next` holds the steps after the reads. Do not restate a reading list in it ("re-read the handoff and notes, then …"): a shorter list there reads as leave to skip the rest.
 - `after`:
   - `continue` when the next steps need nothing from the user;
   - `discuss` when the user has open questions to answer or a new phase starts with a discussion;
@@ -89,7 +91,7 @@ Treat it like any other compaction point: if one of the moments above holds and 
 For a compaction you requested, the mod adds the re-entry note as a hidden message and starts your next turn with "Resuming from compaction (re-entry note above)." For one you did not request (the user's `/compact`, auto-compaction, idle compaction), the note follows the summary and says how old the handoff on record is; anything after it is only in the summary.
 The note also states the repo's branch, HEAD and uncommitted file count at compaction time.
 
-1. Re-read the handoff in full and the listed files at the listed scope before acting on anything, including subagent notifications that arrived meanwhile.
+1. Re-read the handoff in full and every listed file at the listed scope, each with the Read tool, before acting on anything, including subagent notifications that arrived meanwhile. A copy restored into context does not count. After your first turn the mod names any listed file you did not open.
 2. Check the handoff against the repo state in the note and the running agents' state (their output files). Where they disagree, trust the repo and the files.
 3. Ask the user again any open questions the handoff lists.
 4. Proceed as the `after` mode says.

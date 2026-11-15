@@ -1,6 +1,6 @@
 {
   "name": "last-words",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Claude-managed compaction: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files.",
   "author": {
     "name": "Derek Law"

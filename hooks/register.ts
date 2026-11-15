@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { PluginOptions, Register } from 'claude-code'
 
-import type { AfterMode, CompactionRequest, HcInbound, HcState, HcTurns, RereadItem } from '../types'
+import type { AfterMode, CompactionRequest, HcInbound, HcReads, HcState, HcTurns, RereadItem } from '../types'
 
 const PLUGIN = 'last-words'
 const SKILL = `${PLUGIN}:compaction-handoff`
@@ -27,6 +27,8 @@ const NO_INBOUND: HcInbound = { at: 0 }
 const ib = atom({ plugin: 'last-words', key: 'inbound' } as const, NO_INBOUND, { shape: 'ib-1' })
 const NO_TURNS: HcTurns = { running: false, endedAt: 0 }
 const tu = atom({ plugin: 'last-words', key: 'turns' } as const, NO_TURNS, { shape: 'tu-1' })
+const NO_READS: HcReads = { armed: false, started: false, files: [] }
+const rd = atom({ plugin: 'last-words', key: 'reads' } as const, NO_READS, { shape: 'rd-1' })
 // Claude Code's idle compaction fires about 54 minutes after the last activity; anything idle this long counts.
 const IDLE_MIN_MS = 40 * 60_000
 
@@ -52,7 +54,7 @@ const INPUT_SCHEMA = {
     handoff: { type: 'string', description: 'Path of the handoff file (absolute, or relative to the session directory). Always re-read in full after compaction.' },
     reread: {
       type: 'array',
-      description: 'Other files to re-read after compaction, most important first.',
+      description: 'Other files to re-read after compaction, most important first (not the handoff, which is always read first).',
       items: {
         type: 'object',
         properties: {
@@ -68,7 +70,7 @@ const INPUT_SCHEMA = {
       enum: ['continue', 'discuss', 'wait'],
       description: 'continue: resume the next steps on your own. discuss: present open questions and recommendations to the user first, working only on what does not need them. wait: re-read, report, then wait for the user.',
     },
-    next: { type: 'string', description: 'The first steps after re-reading.' },
+    next: { type: 'string', description: 'The first steps after re-reading. Do not restate the reading list here: the note lists every file, and a shorter list here reads as leave to skip the rest.' },
     focus: { type: 'string', description: 'Optional: what the compaction summary should stress.' },
   },
   required: ['handoff', 'reread', 'after', 'next'],
@@ -215,8 +217,7 @@ function absPath(path: string, cwd: string): string {
 }
 
 function rereadLines(req: CompactionRequest): string {
-  const items = [{ path: req.handoff, scope: 'full', why: 'the handoff' }, ...req.reread]
-  return items.map((r, i) => `${i + 1}. ${r.path} (${r.scope === 'full' ? 'in full' : r.scope})${r.why ? ` — ${r.why}` : ''}`).join('\n')
+  return readList(req).map((r, i) => `${i + 1}. ${r.path} (${r.scope === 'full' ? 'in full' : r.scope})${r.why ? ` — ${r.why}` : ''}`).join('\n')
 }
 
 function ago(ms: number): string {
@@ -248,6 +249,47 @@ async function stateLines($: any, req: CompactionRequest | undefined, own: boole
   return lines.join('\n')
 }
 
+// Whether a Read or Bash call opens `file`: Read by its path; Bash by the full path, or by the file name with its folder
+// also named (as in `cd <folder> && sed -n … <name>`).
+function opens(tool: string, e: any, file: string, cwd: string): boolean {
+  if (tool === 'Read') return typeof e.file_path === 'string' && absPath(e.file_path, cwd) === file
+  if (tool !== 'Bash' || typeof e.command !== 'string') return false
+  const cmd: string = e.command
+  if (cmd.includes(file)) return true
+  const slash = file.lastIndexOf('/')
+  const name = file.slice(slash + 1)
+  const dir = file.slice(0, slash)
+  return name !== '' && cmd.includes(name) && (cmd.includes(dir) || (cwd === dir && !cmd.includes('/' + name)))
+}
+
+function readList(req: CompactionRequest): RereadItem[] {
+  return [{ path: req.handoff, scope: 'full', why: 'the handoff' }, ...req.reread]
+}
+
+async function armReads($: any, req: CompactionRequest | undefined) {
+  if (!req) return
+  await update($, rd, () => ({ armed: true, started: false, files: readList(req).map(r => ({ ...r, read: false })) }))
+}
+
+// After the first turn that follows a compaction, names the listed files Claude has not opened; once only.
+async function checkReads($: any, aborted: boolean) {
+  const r = await read($, rd)
+  if (!r.armed || !r.started) return
+  await update($, rd, () => NO_READS)
+  const missing = r.files.filter(f => !f.read)
+  await dbg($, `reading check: ${r.files.length - missing.length}/${r.files.length} read${missing.length ? `; missing ${missing.map(f => f.path).join(', ')}` : ''}`)
+  if (missing.length === 0 || aborted) return
+  const list = missing.map((f, i) => `${i + 1}. ${f.path} (${f.scope === 'full' ? 'in full' : f.scope})${f.why ? ` — ${f.why}` : ''}`).join('\n')
+  const text = `[last-words] The re-entry note asked you to read every listed file before anything else. You have not opened these yet:\n${list}\n\nRead them now, each with the Read tool at its scope (a copy restored into context does not count), then carry on with what you were doing.`
+  $.clock.after(300, async () => {
+    try {
+      await $.prompt.submit({ text, asUser: true })
+    } catch (err: any) {
+      $.ui.log(`${PLUGIN}: could not submit the reading reminder: ${String(err?.message ?? err)}`)
+    }
+  })
+}
+
 function reentryNote(req: CompactionRequest | undefined, n: number, before: number | undefined, after: number | undefined, snapshot: string | undefined, state: string): string {
   const head = `[last-words] This conversation was just compacted (compaction ${n}, ${fmtK(before)} → ${fmtK(after)} tokens).`
   const snap = snapshot ? `The full pre-compaction transcript is archived as session ${snapshot} (claude --resume ${snapshot}); you can grep it for anything the summary and files lack.` : ''
@@ -262,6 +304,7 @@ function reentryNote(req: CompactionRequest | undefined, n: number, before: numb
   return [
     head,
     `First re-read these files:\n${rereadLines(req)}`,
+    `Read all ${req.reread.length + 1} files above, each with the Read tool at its scope, before anything else, even where a copy appears above in this context. The next steps start only after the last one, even if they name fewer files. The mod checks this when your turn ends.`,
     `Next steps: ${req.next}`,
     AFTER_TEXT[req.after],
     state,
@@ -311,6 +354,8 @@ async function validate($: any, input: any): Promise<{ deny: string } | { req: C
     if (typeof r?.path !== 'string') return { deny: 'Each reread item needs a path.' }
     const p = absPath(r.path, cwd)
     if (!(await $.fs.exists(p))) return { deny: `Re-read file ${p} does not exist.` }
+    // The handoff is always read first, in full; listing it again would only repeat it.
+    if (p === handoff || p === real) continue
     reread.push({ path: p, scope: typeof r.scope === 'string' && r.scope !== '' ? r.scope : 'full', ...(typeof r.why === 'string' ? { why: r.why } : {}) })
   }
   const after: AfterMode = input.after === 'discuss' || input.after === 'wait' ? input.after : 'continue'
@@ -406,8 +451,9 @@ async function prune($: any, session: string, home: string) {
   }
 }
 
-async function submitResume($: any, noteText: string) {
+async function submitResume($: any, noteText: string, req: CompactionRequest | undefined) {
   await note($, noteText)
+  await armReads($, req)
   try {
     await $.prompt.submit({ text: RESUME_TEXT, asUser: true })
   } catch (err: any) {
@@ -506,8 +552,24 @@ export const register: Register = (on, options) => {
     return { result: 'Compaction queued for the end of this turn. End your turn now. If anything arrives before the turn ends, the request is cancelled and you will be told.' }
   }).catch(() => ({ deny: 'request_compaction failed inside the last-words mod; compaction was not queued.' }))
 
+  // The reading check: marks each listed file as read when the main thread opens it after a compaction.
+  on('tool.call', async ($, e, next) => {
+    if ((e as any).agentId === undefined && (e.tool === 'Read' || e.tool === 'Bash')) {
+      const r = await read($, rd)
+      if (r.armed && r.files.some(f => !f.read)) {
+        const cwd = await $.session.cwd()
+        const hit = r.files.map(f => f.read || opens(e.tool, e, f.path, cwd))
+        if (hit.some((h, i) => h !== r.files[i]?.read)) await update($, rd, v => ({ ...v, files: v.files.map((f, i) => ({ ...f, read: f.read || hit[i] === true })) }))
+      }
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) await update($, tu, v => ({ ...v, running: true }))
+    if (e.agentId === undefined) {
+      await update($, tu, v => ({ ...v, running: true }))
+      if ((await read($, rd)).armed) await update($, rd, v => ({ ...v, started: true }))
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -535,6 +597,7 @@ export const register: Register = (on, options) => {
         await runCompact($)
       }
     } else {
+      await checkReads($, e.isAborted === true)
       await nudge($, tokens)
     }
     await status($, tokens)
@@ -590,9 +653,13 @@ export const register: Register = (on, options) => {
     if (snapId) $.ui.toast(`Pre-compact snapshot: claude --resume ${snapId}`, { timeoutMs: 10_000 })
     const state = await stateLines($, req, own).catch(() => '')
     const noteText = reentryNote(req, n, res.tokensBefore ?? before, res.tokensAfter, snapId, state)
+    // The reading check runs after the next turn for the mod's own compaction (armed with the resume prompt, so the
+    // /compact command's own turn does not count) and for auto-compaction; after the user's own /compact the user is
+    // present and steers the next turn.
+    if (e.trigger === 'auto') await armReads($, req)
     if (own) {
       // The note goes in as a hidden row just before the resume prompt, after the /compact rows; the user sees one short line.
-      $.clock.after(300, () => void submitResume($, noteText))
+      $.clock.after(300, () => void submitResume($, noteText, req))
       return res
     }
     return { ...res, messages: [...res.messages, { role: 'user' as const, text: noteText, toolUses: [] }] }

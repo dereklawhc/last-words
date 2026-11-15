@@ -52,8 +52,20 @@ export type HcTurns = {
   endedAt: number
 }
 
+/** A file the re-entry note told Claude to read, and whether Claude has opened it since. */
+export type HcReadItem = RereadItem & { read: boolean }
+
+/** The reading check after a compaction; written by the tool.call and turn hooks only. */
+export type HcReads = {
+  /** True from the compaction until the check has run once. */
+  armed: boolean
+  /** True once a main-loop turn has started since arming. */
+  started: boolean
+  files: HcReadItem[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'last-words': { s: Shaped<HcState>; inbound: Shaped<HcInbound>; turns: Shaped<HcTurns> }
+    'last-words': { s: Shaped<HcState>; inbound: Shaped<HcInbound>; turns: Shaped<HcTurns>; reads: Shaped<HcReads> }
   }
 }

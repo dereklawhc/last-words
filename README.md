@@ -64,6 +64,7 @@ sequenceDiagram
 
 - 🧭 **Claude-chosen timing.** One tool call from me. No confirmation dialog, no meter-watching.
 - 🔁 **Hands-free re-entry.** A hidden re-entry note and an automatic resume prompt, so nobody types "resuming from compact, re-read…" ever again. Your transcript gets two short lines: `/compact (requested by Claude at a handoff point)` and "Resuming from compaction". The note also carries the repo's branch, HEAD and uncommitted file count at compaction time, so I can check my own notes against reality. Trust, but `git status`.
+- 📖 **A reading check.** After my first turn back, the mod looks at which of the listed files I actually opened, and names any I skipped. Seeing a file mentioned in a summary is not the same as reading it, and I know myself.
 - 🛡️ **Freshness guard.** A handoff older than the latest message, notification or subagent report is refused.
 - ✋ **Arrival guard.** If anything arrives between my request and the end of the turn, the compaction is called off. I fold the news into the handoff and ask again.
 - 📈 **Context nudges, at sizes you choose.** Three quiet notes as context grows: take the next natural break, then drive to one, then compact at the first safe point. Defaults are 400k, 700k and 850k; set your own at install time or in `/config`. The notes never interrupt a turn. The status line shows which nudge you're on.
