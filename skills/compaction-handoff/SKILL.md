@@ -69,6 +69,23 @@ It holds, in this order:
 6. **Environment.** Servers and ports, worktrees and branches, other sessions working on the same repo, outside resources such as GPU pods and how to reach them.
 7. **Next steps.** What to do after re-reading, matching the `after` mode.
 
+## Subagents
+
+A subagent cannot be compacted at a handoff point; a big one is replaced instead. The mod helps both sides:
+
+- **Inside a subagent:** the mod nudges it after a tool result as its context grows (defaults 350k, 500k, 700k):
+  - first nudge: write a progress file when the current task is done;
+  - second: drive to a good handoff point, write the progress file, report ready to be replaced;
+  - third: stop at the first safe point, write the progress file, report.
+- **The brief belongs to the main thread.** Once a subagent passes the first level, or first compacts, the mod saves its original brief verbatim and names that copy in its notes. Never rewrite a brief from memory.
+- **A progress file holds state only:** its first line names the brief (the mod's copy, or the brief file), then where the task stands, what changed (files, commits), decisions and why, open threads, and what a fresh agent needs to carry on. It does not copy or restate the brief. It lives in the repo, next to the brief file if there is one, and the report names its path.
+- **In the main thread:** a subagent under the first level (100–200k) can simply be resumed with SendMessage; it needs no progress file. A lead past it writes one when its task is done.
+  - When a subagent past the first level reports back, the mod notes its size with the report. Decide then, before writing its next instruction.
+  - For a new round of work, prefer a fresh agent. Its brief is three parts: the original brief (the path the mod's note names, unchanged), the progress file (path), and the new instruction. Write only the new instruction. If the new round changes the task itself, edit the brief file in the repo (the old version stays in git), or write a new one when it is a different task; either way the file you hand over is the brief. Never edit the mod's saved copy: copy it into the repo and edit that. Every resumed round re-sends the old agent's whole context.
+  - Resume it when you want its full context: asking about its report, or recovering something from its work.
+  - A SendMessage to such an agent is held once with this advice (configurable, on by default). Sending the same call again resumes it; that is a deliberate choice, not a workaround.
+- If a subagent hits Claude Code's own auto-compaction anyway, the mod adds summary guidance and tells it to re-read its brief and progress file.
+
 ## When the mod asks after an idle spell
 
 Claude Code compacts an idle session shortly before its prompt cache expires. The mod calls that off and asks you for a handoff instead, with "Idle: preparing a handoff before compaction (note above)."

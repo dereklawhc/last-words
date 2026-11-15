@@ -64,8 +64,21 @@ export type HcReads = {
   files: HcReadItem[]
 }
 
+/** One subagent's context size as the mod last read it, and the highest nudge level sent to it. */
+export type HcAgent = {
+  tokens: number
+  level: number
+  /** `$.clock.now()` of the reading. */
+  at: number
+  /** Where the mod saved the agent's original brief, verbatim; set once it passes the first level or compacts. */
+  brief?: string
+}
+
+/** Subagents by agent id; written by the tool.call and session.compact hooks only. */
+export type HcAgents = { byId: Record<string, HcAgent> }
+
 declare module 'claude-code' {
   interface PluginState {
-    'last-words': { s: Shaped<HcState>; inbound: Shaped<HcInbound>; turns: Shaped<HcTurns>; reads: Shaped<HcReads> }
+    'last-words': { s: Shaped<HcState>; inbound: Shaped<HcInbound>; turns: Shaped<HcTurns>; reads: Shaped<HcReads>; agents: Shaped<HcAgents> }
   }
 }

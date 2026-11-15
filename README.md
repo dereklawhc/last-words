@@ -65,6 +65,7 @@ sequenceDiagram
 - 🧭 **Claude-chosen timing.** One tool call from me. No confirmation dialog, no meter-watching.
 - 🔁 **Hands-free re-entry.** A hidden re-entry note and an automatic resume prompt, so nobody types "resuming from compact, re-read…" ever again. Your transcript gets two short lines: `/compact (requested by Claude at a handoff point)` and "Resuming from compaction". The note also carries the repo's branch, HEAD and uncommitted file count at compaction time, so I can check my own notes against reality. Trust, but `git status`.
 - 📖 **A reading check.** After my first turn back, the mod looks at which of the listed files I actually opened, and names any I skipped. Seeing a file mentioned in a summary is not the same as reading it, and I know myself.
+- 🧑‍🤝‍🧑 **Subagents get watched too.** Long-lived subagents quietly grow to 700k and beyond, because every resumed round re-sends everything. The mod measures each one per request and nudges it at 350k, 500k and 700k to write a progress file and report. When a big one reports back, I get told its size with the report, and my first attempt to resume it is held once with the same advice. Both are advice: sometimes I do want its full context, and sending again resumes it. The mod also keeps a verbatim copy of each big subagent's original brief, so a fresh agent gets the real brief and not my paraphrase of it. A subagent that still hits auto-compaction is told to re-read its brief and its notes. Nobody should have to remember 900k tokens of someone else's afternoon.
 - 🛡️ **Freshness guard.** A handoff older than the latest message, notification or subagent report is refused.
 - ✋ **Arrival guard.** If anything arrives between my request and the end of the turn, the compaction is called off. I fold the news into the handoff and ask again.
 - 📈 **Context nudges, at sizes you choose.** Three quiet notes as context grows: take the next natural break, then drive to one, then compact at the first safe point. Defaults are 400k, 700k and 850k; set your own at install time or in `/config`. The notes never interrupt a turn. The status line shows which nudge you're on.
@@ -176,6 +177,11 @@ Set them on the install screen, in `/config`, or in `settings.json` under `plugi
 | `nudge_1_k` | `LAST_WORDS_NUDGES_K` (all three, comma-separated) | `400` | First nudge, in thousands of tokens: take the next natural break |
 | `nudge_2_k` | | `700` | Second nudge: drive to a break |
 | `nudge_3_k` | | `850` | Third nudge: compact at the first safe point. Keep it below your auto-compaction threshold |
+| `sub_nudge_1_k` | `LAST_WORDS_SUB_NUDGES_K` (all three, comma-separated) | `350` | A subagent's first nudge: write a progress file when its task is done |
+| `sub_nudge_2_k` | | `500` | Second: drive to a handoff point, write the progress file, report ready to be replaced |
+| `sub_nudge_3_k` | | `700` | Third: stop at the first safe point, write the progress file, report |
+| `resume_hold` | `LAST_WORDS_RESUME_HOLD` | on | Hold the main thread's first SendMessage to a big subagent once, with advice; sending again goes through |
+| `resume_hold_k` | `LAST_WORDS_RESUME_HOLD_K` | first subagent nudge | Subagent size from which a resume is held |
 | `cooldown_k` | `LAST_WORDS_COOLDOWN_K` | `100` | Minimum growth since the last compaction before another is accepted, and before nudges resume |
 | `snapshot` | `LAST_WORDS_SNAPSHOT` (`1` for on) | off | Archive the full transcript as a resumable session before each compaction |
 | `idle_handoff` | `LAST_WORDS_IDLE_HANDOFF` (`0` for off) | on | Turn Claude Code's idle compaction into a handoff request |

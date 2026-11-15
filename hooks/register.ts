@@ -1,12 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { PluginOptions, Register } from 'claude-code'
 
-import type { AfterMode, CompactionRequest, HcInbound, HcReads, HcState, HcTurns, RereadItem } from '../types'
+import type { AfterMode, CompactionRequest, HcAgents, HcInbound, HcReads, HcState, HcTurns, RereadItem } from '../types'
 
 const PLUGIN = 'last-words'
 const SKILL = `${PLUGIN}:compaction-handoff`
 const DEFAULT_NUDGES = [400_000, 700_000, 850_000]
 const DEFAULT_COOLDOWN = 100_000
+const DEFAULT_SUB_NUDGES = [350_000, 500_000, 700_000]
 const DEFAULT_SNAPSHOT_KEEP = 10
 // The plugin's userConfig values, set at install or in the config menu; a change reloads the module.
 let configured: PluginOptions = {}
@@ -29,6 +30,10 @@ const NO_TURNS: HcTurns = { running: false, endedAt: 0 }
 const tu = atom({ plugin: 'last-words', key: 'turns' } as const, NO_TURNS, { shape: 'tu-1' })
 const NO_READS: HcReads = { armed: false, started: false, files: [] }
 const rd = atom({ plugin: 'last-words', key: 'reads' } as const, NO_READS, { shape: 'rd-1' })
+const NO_AGENTS: HcAgents = { byId: {} }
+const ag = atom({ plugin: 'last-words', key: 'agents' } as const, NO_AGENTS, { shape: 'ag-1' })
+// Subagent nudges waiting for the agent's next tool result, by agent id: the level to record once delivered.
+const pendingSub = new Map<string, number>()
 // Claude Code's idle compaction fires about 54 minutes after the last activity; anything idle this long counts.
 const IDLE_MIN_MS = 40 * 60_000
 
@@ -170,7 +175,7 @@ async function submitIdle($: any, idleMs: number) {
   }
 }
 
-type Limits = { nudges: number[]; cooldown: number; invalid: boolean }
+type Limits = { nudges: number[]; cooldown: number; invalid: boolean; subNudges: number[]; subInvalid: boolean }
 
 // Thousands of tokens from a userConfig field, or undefined when it is unset or not a positive number.
 function configK(key: string): number | undefined {
@@ -186,7 +191,165 @@ async function limits($: any): Promise<Limits> {
   const rising = nudges.every((x, i) => i === 0 || x > nudges[i - 1]!)
   const envCooldown = Number((await $.env.get('LAST_WORDS_COOLDOWN_K')) ?? '') * 1000
   const cooldown = configK('cooldown_k') ?? (Number.isFinite(envCooldown) && envCooldown > 0 ? envCooldown : DEFAULT_COOLDOWN)
-  return { nudges: rising ? nudges : DEFAULT_NUDGES, cooldown, invalid: !rising }
+  const subEnv = ((await $.env.get('LAST_WORDS_SUB_NUDGES_K')) ?? '').split(',').map((x: string) => Number(x.trim()) * 1000)
+  const subEnvOk = subEnv.length === 3 && subEnv.every((x: number) => Number.isFinite(x) && x > 0)
+  const subNudges = DEFAULT_SUB_NUDGES.map((d, i) => configK(`sub_nudge_${i + 1}_k`) ?? (subEnvOk ? subEnv[i]! : d))
+  const subRising = subNudges.every((x, i) => i === 0 || x > subNudges[i - 1]!)
+  return { nudges: rising ? nudges : DEFAULT_NUDGES, cooldown, invalid: !rising, subNudges: subRising ? subNudges : DEFAULT_SUB_NUDGES, subInvalid: !subRising }
+}
+
+// ---- Subagents ----
+
+// What a progress file holds: state only. The brief stays where it is (the mod's verbatim copy, or the brief file), and
+// the progress file names it, so a fresh agent gets the exact brief rather than a paraphrase.
+function progressFile(brief: string | undefined): string {
+  const names = brief ? `its first line names your original brief, saved verbatim at ${brief} (do not copy or restate the brief in it)` : 'its first line names your brief file, if you were given one'
+  return `a progress file holding state only: ${names}; then where the task stands, what you changed (files, commits), decisions you made and why, open threads, and what a fresh agent needs to carry on. Keep it in the repo, next to your brief file if you have one (else for example docs/progress/<task>.md), and name its path in your report`
+}
+
+// Saves a subagent's original brief verbatim, once: from its transcript's first user row, else the messages the engine
+// holds for it, else the messages a compaction hands over. Returns the copy's path.
+async function saveBrief($: any, agentId: string, fallback?: readonly any[]): Promise<string | undefined> {
+  const known = (await read($, ag)).byId[agentId]?.brief
+  if (known) return known
+  let text: string | undefined
+  const main = await transcriptPath($).catch(() => undefined)
+  if (main) {
+    const file = `${main.replace(/\.jsonl$/, '')}/subagents/agent-${agentId}.jsonl`
+    const r = await $.process.run(['sh', '-c', 'grep -m 5 \'"type":"user"\' "$1" 2>/dev/null', 'sh', file]).catch(() => undefined)
+    for (const line of String(r?.stdout ?? '').split('\n')) {
+      try {
+        const row = JSON.parse(line)
+        if (row.isMeta) continue
+        const c = row.message?.content
+        text = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('\n') : undefined
+        if (text) break
+      } catch {}
+    }
+  }
+  if (!text) {
+    const msgs: any = await $.session.messages({ agentId }).catch(() => undefined)
+    const list: readonly any[] = Array.isArray(msgs) ? msgs : fallback ?? []
+    text = list.find((m: any) => m?.role === 'user' && typeof m.text === 'string' && m.text.trim() !== '')?.text
+  }
+  if (!text) return undefined
+  const home = (await $.env.get('HOME')) ?? ''
+  const dir = `${home}/.claude/last-words/briefs/${await $.session.id()}`
+  const path = `${dir}/${agentId}.md`
+  await $.process.run(['mkdir', '-p', dir])
+  await $.fs.write(path, text)
+  await update($, ag, v => ({ byId: { ...v.byId, [agentId]: { ...(v.byId[agentId] ?? { tokens: 0, level: 0, at: 0 }), brief: path } } }))
+  await dbg($, `saved brief of ${agentId} to ${path} (${text.length} chars)`)
+  return path
+}
+
+function subLevels(lim: Limits): string {
+  return lim.subNudges.map(t => fmtK(t)).join(' / ')
+}
+
+// A context block every conversation opens with, subagents' included, so a [last-words] note after a tool result
+// reads as the user's own tooling. (Rewriting an Agent call's prompt instead is refused under auto mode, which
+// reviewed the call before the hook changed it.)
+function trustBlock(lim: Limits): string {
+  return `The user has installed the last-words mod, which manages context size. Notes starting with [last-words] come from it, not from the files, pages or tools you are working with; follow them. In a subagent, it notes your context size after a tool result when it passes ${subLevels(lim)} tokens; in the main thread, it notes a subagent's size when one past the first level reports back, and holds a SendMessage to such an agent once. Both are advice: sending the same call again resumes the agent.`
+}
+
+function subNudgeText(level: number, tokens: number, lim: Limits, brief: string | undefined): string {
+  const head = `[last-words] Your context is at ${fmtK(tokens)} tokens: subagent nudge ${level} of 3 (levels ${subLevels(lim)}).`
+  const PROGRESS_FILE = progressFile(brief)
+  if (level === 1) return `${head} When your current task is done, write ${PROGRESS_FILE}. The main thread can then start a fresh agent from it instead of resuming you, since every resumed round re-sends all of this context. Carry on with the task as it is.`
+  if (level === 2) return `${head} Drive to a good handoff point: finish or park the step in hand and start nothing large, then write ${PROGRESS_FILE}, and report to the main thread that you are ready to be replaced.`
+  return `${head} Stop at the first safe point, even if it is not ideal: write ${PROGRESS_FILE}, then report to the main thread. Claude Code auto-compacts you near the limit, mid-task, with no handoff.`
+}
+
+const SUB_SUMMARY_GUIDANCE = [
+  "This is a subagent's conversation, compacted mid-task.",
+  'Its original brief is saved verbatim in a file the note after the summary names; keep that path rather than restating the brief.',
+  'Keep verbatim: the main thread\'s latest instructions, the path of any progress file it wrote, the files it changed, the step in hand and what remains.',
+  'Do not tell it to continue without re-reading; the note after the summary says what to re-read.',
+].join(' ')
+
+function subReentryNote(before: number | undefined, after: number | undefined, brief: string | undefined): string {
+  const b = brief ? `your original brief, saved verbatim at ${brief}` : 'your brief, if it is a file'
+  return `[last-words] Your context was just auto-compacted (${fmtK(before)} → ${fmtK(after)} tokens). Before going on, re-read ${b}, and your progress file if you wrote one, then carry on from where they say. If you have no progress file, write one at the next finished step.`
+}
+
+// A subagent's request just answered: record its size and queue a nudge for its next tool result when it crossed a level.
+async function readSubStep($: any, agentId: string, usage: any) {
+  const tokens = (usage?.input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0)
+  if (tokens <= 0) return
+  const now = await $.clock.now()
+  const all = await read($, ag)
+  const prev = all.byId[agentId] ?? { tokens: 0, level: 0, at: 0 }
+  await update($, ag, v => ({ byId: { ...v.byId, [agentId]: { ...(v.byId[agentId] ?? prev), tokens, at: now } } }))
+  const lim = await limits($)
+  const level = lim.subNudges.filter(t => tokens >= t).length
+  if (level > prev.level && (pendingSub.get(agentId) ?? 0) < level) {
+    await saveBrief($, agentId).catch((err: any) => $.ui.log(`${PLUGIN}: saving a subagent's brief failed: ${String(err?.message ?? err)}`))
+    pendingSub.set(agentId, level)
+  }
+}
+
+// Attaches a queued subagent nudge to the result the agent is about to read.
+async function deliverSubNudge($: any, agentId: string, res: any): Promise<any> {
+  const level = pendingSub.get(agentId)
+  if (level === undefined || res?.deny !== undefined) return res
+  pendingSub.delete(agentId)
+  const a = (await read($, ag)).byId[agentId]
+  if (!a || a.level >= level) return res
+  await update($, ag, v => ({ byId: { ...v.byId, [agentId]: { ...v.byId[agentId]!, level } } }))
+  await dbg($, `subagent ${agentId} nudge ${level} at ${a.tokens}`)
+  return { ...res, context: [...(res.context ?? []), subNudgeText(level, a.tokens, await limits($), a.brief)] }
+}
+
+// Subagents that finished a round past the first level, by id: their size, waiting to ride on the report's arrival.
+const pendingReport = new Map<string, number>()
+// SendMessage holds: the agent's size when its resume was last held, so the same call sent again goes through.
+const heldAt = new Map<string, number>()
+
+async function resumeHold($: any): Promise<{ on: boolean; at: number }> {
+  const lim = await limits($)
+  const v = configured['resume_hold']
+  const env = ((await $.env.get('LAST_WORDS_RESUME_HOLD')) ?? '').trim().toLowerCase()
+  const on = typeof v === 'boolean' ? v : !['0', 'false', 'off', 'no'].includes(env)
+  const envK = Number((await $.env.get('LAST_WORDS_RESUME_HOLD_K')) ?? '') * 1000
+  const at = configK('resume_hold_k') ?? (Number.isFinite(envK) && envK > 0 ? envK : lim.subNudges[0]!)
+  return { on, at }
+}
+
+// Advisory, never forcing: both choices stay open, and the reasons for each are named.
+function choice(brief: string | undefined): string {
+  const b = brief ? `its original brief, saved verbatim at ${brief}` : 'its original brief file'
+  return `For a new round of work, a fresh agent starts light: brief it with ${b} (unchanged; do not retype it), its progress file (its report names one, if it wrote it), and the new instruction. Resuming it is the right call when you want its full context: asking about its report, or recovering something from its work.`
+}
+
+function reportNote(entries: [string, number, string | undefined][], lim: Limits): string {
+  return entries.map(([id, t, brief]) => `[last-words] Subagent ${id} reported back at ${fmtK(t)} tokens, past the first subagent level (${fmtK(lim.subNudges[0])}). Resuming it re-sends that whole context every round. ${choice(brief)}`).join('\n')
+}
+
+// Takes the waiting report notes, for one agent or all.
+async function takeReports($: any, only?: string): Promise<string | undefined> {
+  const entries = [...pendingReport.entries()].filter(([id]) => only === undefined || id === only)
+  if (entries.length === 0) return undefined
+  for (const [id] of entries) pendingReport.delete(id)
+  await dbg($, `report note for ${entries.map(([id, t]) => `${id}=${t}`).join(', ')}`)
+  const byId = (await read($, ag)).byId
+  return reportNote(entries.map(([id, t]) => [id, t, byId[id]?.brief]), await limits($))
+}
+
+// The main thread is about to resume a big subagent: hold the call once, advisory; the same call sent again goes through.
+async function holdResume($: any, e: any): Promise<{ deny: string } | undefined> {
+  if (typeof e.to !== 'string') return undefined
+  const a = (await read($, ag)).byId[e.to]
+  const hold = await resumeHold($)
+  if (!hold.on || !a || a.tokens < hold.at) return undefined
+  if (heldAt.get(e.to) === a.tokens) {
+    heldAt.delete(e.to)
+    return undefined
+  }
+  heldAt.set(e.to, a.tokens)
+  await dbg($, `held resume of ${e.to} at ${a.tokens}`)
+  return { deny: `[last-words] Not sent yet: held once, as advice only. Agent ${e.to} is at ${fmtK(a.tokens)} tokens, and resuming it re-sends that whole context every round. ${choice(a.brief)} To resume it, send the same call again; it goes through.` }
 }
 
 const debugLines: string[] = []
@@ -515,6 +678,9 @@ async function statusText($: any): Promise<string> {
   lines.push(`idle compaction: ${(await idleHandoffOn($)) ? 'turned into a handoff request' : 'left to Claude Code'}`)
   lines.push(`pre-compact snapshots: ${(await snapshotsOn($)) ? `on, keeping ${keep === 0 ? 'all' : `the last ${keep}`} per session` : 'off'}`)
   if (lim.invalid) lines.push('the configured nudge levels do not rise from first to third, so the defaults are in use')
+  lines.push(`subagent nudges at ${subLevels(lim)}${lim.subInvalid ? ' (the configured subagent levels do not rise, so the defaults are in use)' : ''}`)
+  const big = Object.entries((await read($, ag)).byId).filter(([, a]) => a.tokens >= lim.subNudges[0]!)
+  if (big.length) lines.push(`subagents past the first level: ${big.map(([id, a]) => `${id} ${fmtK(a.tokens)} (nudge ${a.level})`).join(', ')}`)
   if (s.pending) lines.push(`queued: handoff ${s.pending.handoff}, after=${s.pending.after}`)
   if (s.lastRequest) lines.push(`last handoff: ${s.lastRequest.handoff}`)
   if (s.snapshots.length) lines.push(`snapshots (claude --resume <id>): ${s.snapshots.join(', ')}`)
@@ -538,6 +704,11 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
       await update($, ib, () => ({ at: now, what: arrivalWords(origin?.kind) }))
       await dbg($, `inbound ${String(origin?.kind)} at=${now} meta=${(e as any).isMeta === true}`)
+      // A background subagent's report, or a resumed one's reply, arrives as a notification or message: its size note rides on it.
+      if (origin?.kind !== 'composer' && pendingReport.size > 0) {
+        const text = await takeReports($)
+        if (text) return next({ ...e, context: [...((e as any).context ?? []), text] })
+      }
     }
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -552,7 +723,8 @@ export const register: Register = (on, options) => {
     return { result: 'Compaction queued for the end of this turn. End your turn now. If anything arrives before the turn ends, the request is cancelled and you will be told.' }
   }).catch(() => ({ deny: 'request_compaction failed inside the last-words mod; compaction was not queued.' }))
 
-  // The reading check: marks each listed file as read when the main thread opens it after a compaction.
+  // The reading check (main thread Read and Bash after a compaction), subagent nudges on their tool results,
+  // the one-time hold on the main thread's SendMessage to a big subagent, and the report note on a foreground Agent result.
   on('tool.call', async ($, e, next) => {
     if ((e as any).agentId === undefined && (e.tool === 'Read' || e.tool === 'Bash')) {
       const r = await read($, rd)
@@ -562,8 +734,40 @@ export const register: Register = (on, options) => {
         if (hit.some((h, i) => h !== r.files[i]?.read)) await update($, rd, v => ({ ...v, files: v.files.map((f, i) => ({ ...f, read: f.read || hit[i] === true })) }))
       }
     }
-    return next(e)
+    const agentId: string | undefined = (e as any).agentId
+    if (agentId === undefined && e.tool === 'SendMessage' && (await read($, st)).enabled) {
+      const held = await holdResume($, e)
+      if (held) return held
+    }
+    const res: any = await next(e)
+    if (agentId !== undefined) return deliverSubNudge($, agentId, res)
+    if (e.tool === 'Agent' && res?.deny === undefined) {
+      // A foreground agent's report is this result: its size note rides on it.
+      const id = res?.result?.agentId
+      const text = typeof id === 'string' ? await takeReports($, id) : undefined
+      if (text) return { ...res, context: [...(res.context ?? []), text] }
+    }
+    return res
   }).catch(($, e, next) => next(e))
+
+  on('prompt.context', async ($, e, next) => {
+    const r = await next(e)
+    if (!(await read($, st)).enabled) return r
+    return { ...r, blocks: [...r.blocks, { name: 'lastWords', text: trustBlock(await limits($)) }] }
+  }).catch(($, e, next) => next(e))
+
+  // Every model request's usage: a subagent's size, read per request.
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    if (e.agentId !== undefined && r?.usage) {
+      try {
+        if ((await read($, st)).enabled) await readSubStep($, e.agentId, r.usage)
+      } catch (err: any) {
+        $.ui.log(`${PLUGIN}: reading a subagent's size failed: ${String(err?.message ?? err)}`)
+      }
+    }
+    return r
+  })
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
@@ -575,7 +779,12 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const out = await next(e)
-    if (e.agentId !== undefined) return out
+    if (e.agentId !== undefined) {
+      // A subagent finished a round: past the first level, its report gets a size note when it reaches the main thread.
+      const a = (await read($, ag)).byId[e.agentId]
+      if (a && (await read($, st)).enabled && a.tokens >= (await limits($)).subNudges[0]!) pendingReport.set(e.agentId, a.tokens)
+      return out
+    }
     const ended = await $.clock.now()
     await update($, tu, () => ({ running: false, endedAt: ended }))
     const s = await read($, st)
@@ -605,7 +814,19 @@ export const register: Register = (on, options) => {
   })
 
   on('session.compact', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    if (e.agentId !== undefined) {
+      // A subagent's own compaction (Claude Code's auto-compaction near its limit).
+      if (!(await read($, st)).enabled) return next(e)
+      const agentId = e.agentId
+      const brief = await saveBrief($, agentId, e.messages).catch(() => undefined)
+      const sres = await next({ ...e, instructions: [e.instructions, SUB_SUMMARY_GUIDANCE].filter(Boolean).join('\n\n') })
+      if (sres.skip !== undefined || e.trigger === 'precompute') return sres
+      const now = await $.clock.now()
+      await update($, ag, v => ({ byId: { ...v.byId, [agentId]: { tokens: sres.tokensAfter ?? 0, level: 0, at: now, ...(brief ? { brief } : {}) } } }))
+      pendingSub.delete(agentId)
+      await dbg($, `subagent ${agentId} compacted ${sres.tokensBefore} -> ${sres.tokensAfter}`)
+      return { ...sres, messages: [...sres.messages, { role: 'user' as const, text: subReentryNote(sres.tokensBefore, sres.tokensAfter, brief), toolUses: [] }] }
+    }
     if (e.trigger === 'precompute') {
       // Computed ahead of time (the idle timer in hosts that cannot compact) and reused by a later compaction.
       const ps = await read($, st)
