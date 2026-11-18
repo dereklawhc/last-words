@@ -11,14 +11,16 @@ The user's explicit instructions always win over this protocol.
 
 ## When to compact
 
-1. **First: what the user asked for.** If the user has said when to compact ("compact after each wave lands", "compact once this PR merges", "not until I'm back", "prepare for compact now"), or their `CLAUDE.md` or memory describes a compaction routine, follow it. Use the moments below only when they have expressed nothing.
-2. **Default: a build wave has started.**
-   - The previous wave's results are reviewed and committed.
-   - Every brief of the current wave is a file, written before its agent started.
-   - The current wave's agents are running and the main thread is waiting.
-   - Briefs for later waves that need the full history are drafted, as files.
-3. **A phase has closed.** The user approved its review gate, or a research question is answered, and the next phase opens with a new discussion. Use `after: "discuss"`.
-4. **A long wait.** Everything is running and nothing will come back for a while.
+1. **First: what the user asked for.** If the user has said when to compact ("compact after each wave lands", "compact once this PR merges", "not until I'm back", "prepare for compact now"), or their `CLAUDE.md` or memory describes a compaction routine, follow it. Use the strategy and moments below only where they have expressed nothing.
+2. **Then: the approved compaction strategy for this project, when one is in force.** The user approved it during last-words setup, and it appears in your system prompt. Its moments, its "not now" items, its handoff place and contents, and its `after` mode replace the built-in ones below. "When not to compact" still applies in full.
+3. **Otherwise: the built-in moments.**
+   - **A build wave has started.**
+     - The previous wave's results are reviewed and committed.
+     - Every brief of the current wave is a file, written before its agent started.
+     - The current wave's agents are running and the main thread is waiting.
+     - Briefs for later waves that need the full history are drafted, as files.
+   - **A phase has closed.** The user approved its review gate, or a research question is answered, and the next phase opens with a new discussion. Use `after: "discuss"`.
+   - **A long wait.** Everything is running and nothing will come back for a while.
 
 ## When not to compact
 
@@ -35,7 +37,7 @@ A question for the user never blocks compaction. Write it in the handoff's open-
 ## Urgency by context size
 
 The mod nudges you three times as context grows.
-Each note names its level and the session's configured sizes; the defaults are 400k, 700k and 850k tokens, and `/auto-compact status` shows the current ones.
+Each note names its level and the session's configured sizes; the defaults are 400k, 700k and 850k tokens on a 1M window, scaled down on smaller windows, and an approved strategy may set others; `/auto-compact status` shows the current ones.
 
 - **Before the first nudge:** compact only at a major phase boundary before a big next phase.
 - **After the first nudge:** take the next natural handoff point. Do not force one.
@@ -73,7 +75,7 @@ It holds, in this order:
 
 A subagent cannot be compacted at a handoff point; a big one is replaced instead. The mod helps both sides:
 
-- **Inside a subagent:** the mod nudges it after a tool result as its context grows (defaults 350k, 500k, 700k):
+- **Inside a subagent:** the mod nudges it after a tool result as its context grows (defaults 350k, 500k, 700k on a 1M window):
   - first nudge: write a progress file when the current task is done;
   - second: drive to a good handoff point, write the progress file, report ready to be replaced;
   - third: stop at the first safe point, write the progress file, report.

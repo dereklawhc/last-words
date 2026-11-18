@@ -68,7 +68,8 @@ sequenceDiagram
 - 🧑‍🤝‍🧑 **Subagents get watched too.** Long-lived subagents quietly grow to 700k and beyond, because every resumed round re-sends everything. The mod measures each one per request and nudges it at 350k, 500k and 700k to write a progress file and report. When a big one reports back, I get told its size with the report, and my first attempt to resume it is held once with the same advice. Both are advice: sometimes I do want its full context, and sending again resumes it. The mod also keeps a verbatim copy of each big subagent's original brief, so a fresh agent gets the real brief and not my paraphrase of it. A subagent that still hits auto-compaction is told to re-read its brief and its notes. Nobody should have to remember 900k tokens of someone else's afternoon.
 - 🛡️ **Freshness guard.** A handoff older than the latest message, notification or subagent report is refused.
 - ✋ **Arrival guard.** If anything arrives between my request and the end of the turn, the compaction is called off. I fold the news into the handoff and ask again.
-- 📈 **Context nudges, at sizes you choose.** Three quiet notes as context grows: take the next natural break, then drive to one, then compact at the first safe point. Defaults are 400k, 700k and 850k; set your own at install time or in `/config`. The notes never interrupt a turn. The status line shows which nudge you're on.
+- 📈 **Context nudges, at sizes you choose.** Three quiet notes as context grows: take the next natural break, then drive to one, then compact at the first safe point. The defaults scale with your context window: 400k, 700k and 850k on 1M, about 69k, 121k and 147k on 200k. Setup tunes them to your work, or set your own at install time or in `/config`. The notes never interrupt a turn. The status line shows which nudge you're on.
+- 🪡 **Setup, tailored to how you work.** One offer after your first task, or `/last-words setup` any time. With your consent the mod scans your history locally, subagents read the samples you choose, and I propose a compaction strategy per project from nine templates. Nothing is saved until you approve it. Details below.
 - 🧠 **A bundled playbook.** The `compaction-handoff` skill teaches me when to compact, when not to, and what a good handoff holds. It's plain Markdown: edit it to fit how you work.
 - 🙋 **Respects your gates.** If you asked for a pause or a review gate, I don't compact at it until you approve. Open questions go into the handoff instead of blocking.
 - 🗂️ **Optional snapshots: nothing is forgotten, only archived.** Turn them on, and the pre-compaction transcript becomes its own session in `claude --resume`, titled like `My session · pre-compact 3 · 2026-11-14 16:02 · 640k`, with the handoff and re-read files copied beside it. For when you remember something I forgot. On APFS and reflink filesystems the copy is instant and nearly free. The last 10 per session are kept by default; set your own limit, or keep them all.
@@ -78,11 +79,12 @@ sequenceDiagram
 ## When should Claude compact?
 
 The bundled skill ships with a few worked examples.
-They're a starting point, not scripture: the right moment depends on how you work, and the skill is yours to edit.
+They're a starting point, not scripture: the right moment depends on how you work.
+[Setup](#setup-fit-it-to-how-you-work) replaces them with a strategy you approved, and the skill is yours to edit.
 
 | Example moment | Looks like |
 | --- | --- |
-| **Whenever you said** | You told me when ("after each wave lands", "not until I'm back"), or your `CLAUDE.md` describes a routine. That always comes first; the rest are defaults |
+| **Whenever you said** | You told me when ("after each wave lands", "not until I'm back"), or your `CLAUDE.md` describes a routine. That always comes first; then the strategy you approved in setup; the rest are defaults |
 | **A wave of work has started** | The previous batch is reviewed and committed, the new subagents are briefed (briefs saved as files) and running, and the main thread is waiting |
 | **A phase has closed** | A review passed or a question was answered, and the next phase starts with a fresh discussion |
 | **A long wait** | Everything is running, and nothing will come back for a while |
@@ -93,10 +95,10 @@ Context size only sets the urgency, through the three nudges:
 
 | Context | What I do |
 | --- | --- |
-| Before the first nudge (default 400k) | Compact only at a major phase boundary |
+| Before the first nudge (default 41% of the auto-compact limit: 400k on 1M) | Compact only at a major phase boundary |
 | After the first nudge | Take the next natural break |
-| After the second nudge (default 700k) | Drive to a break: delegate the rest, draft the next briefs, compact |
-| After the third nudge (default 850k) | Compact at the first safe point |
+| After the second nudge (default 72%: 700k on 1M) | Drive to a break: delegate the rest, draft the next briefs, compact |
+| After the third nudge (default 88%: 850k on 1M) | Compact at the first safe point |
 
 ## What goes in a handoff
 
@@ -134,7 +136,42 @@ claude plugin install last-words --marketplace dereklawhc/last-words
 
 In the desktop app: click **+** next to the prompt box → **Plugins** → **Add marketplace**, enter `dereklawhc/last-words`, then **Add plugin**.
 
-**Requirements:** Claude Code 2.1.325 or later, with plugin hook modules ("mods"). Tested on macOS; Linux should work but is untested.
+**Requirements:** Claude Code 2.1.325 or later, with plugin hook modules ("mods"). Tested on macOS; Linux should work but is untested. Setup's history scan needs macOS or Linux; everything else doesn't care.
+
+## Setup: fit it to how you work
+
+> My compaction habits were learned from one person who runs waves of subagents and reviews everything twice.
+> If you write documents, chase experiments, or keep one session open all week, those habits are wrong for you.
+> Setup is how I find out.
+
+In the first session after you install, I offer setup once, in one line, after I've finished whatever you asked for first.
+Say no and I won't bring it up again; `/last-words setup` runs it whenever you like.
+
+1. **I ask first.** Before reading anything, I say what I'd read and where it goes. You can skip the history and answer a few questions about how you work instead.
+2. **A local scan.** The mod reads your transcripts under `~/.claude/projects`, your `CLAUDE.md` files and your memory, on your machine. It counts tools, sizes, timings and commands, not what you wrote, and hands me a summary per project.
+3. **You pick the scope.** I show what the scan found, in plain words, and suggest what's worth a closer read, with a budget in tokens and minutes. You choose: everything, some projects, or one pattern ("why do these three keep hitting auto-compaction?").
+4. **A closer read.** Samples of your own typed messages from those projects go to Sonnet subagents, which describe how you work: rhythm, natural stopping points, review gates, how you hand work over. Only their descriptions reach me.
+5. **A proposal.** Per project or group of projects: which templates fit (short tasks, a long single-thread build, waves of subagents, phased research, experiment and ops loops, visual iteration, document work, a long-running assistant session, data wrangling), when to compact and when not, where the handoff lives, what happens after, and the nudge levels in your window's tokens. Each choice comes with its evidence, and I ask only what your history can't tell me.
+6. **Nothing is saved until you say yes.** We go back and forth until it's right; then I save it, and it applies from that moment on.
+
+**What is read, and what is kept.**
+
+| | Where | What |
+| --- | --- | --- |
+| Read | `~/.claude/projects`, `CLAUDE.md` files, memory | Read in place. The scan makes no network calls. Message samples go only to the model this session already uses, and only for the projects you picked |
+| Kept | `~/.claude/last-words/setup/features.json` | The scan's counts and sizes, no message text |
+| Temporary | `~/.claude/last-words/setup/samples/` | The message samples; deleted when setup saves or is abandoned |
+| Profiles | `~/.claude/last-words/strategy/user.md`, `~/.claude/last-words/strategy/projects/<project>.md` | What you approved: the numbers at the top, then the moments, the not-nows, the handoff and what happens after. Never transcript text. Project files are named like Claude Code's own folders under `~/.claude/projects` |
+
+Your own words, `CLAUDE.md` and memory still win over any profile; a project's profile wins over your user-wide one; either wins over the built-in defaults.
+The profiles are short Markdown files, so edit them by hand if you like.
+A handoff can live in the repo, in a folder you choose, or with `handoff: mod`, in `~/.claude/last-words/handoffs/<project>/`, for projects without a repo or where you'd rather keep my notes out of it.
+
+**Re-run or remove.** `/last-words setup` runs it again; `/auto-compact status` names the profile in force.
+Delete a profile file to drop it.
+Delete `~/.claude/last-words/setup/` and `~/.claude/last-words/strategy/` to remove everything setup kept.
+
+Setup's scan runs on macOS and Linux only: it streams your transcripts through `/bin/cat`, which Windows doesn't have.
 
 ## Usage
 
@@ -145,6 +182,7 @@ There's nothing to do: the plugin is on in every session by default.
 | `/auto-compact status` | Shows whether it's on, the context size, the nudge levels, idle handling, whether snapshots are on, any queued request, and snapshot ids |
 | `/auto-compact off` · `on` | Turns it off or on for this session |
 | `/prepare-compact` | Asks me to wrap up, write the handoff and request compaction now |
+| `/last-words setup` | Runs setup: tailor the compaction strategy to how you work |
 
 What I send when I'm ready:
 
@@ -170,29 +208,34 @@ claude --resume <snapshot-id>   # ids from /auto-compact status or the toast
 ## Configuration
 
 The thresholds are settings, not opinions, and snapshots are opt-in.
-Set them on the install screen, in `/config`, or in `settings.json` under `pluginConfigs["last-words"].options`.
+Out of the box, the levels are shares of Claude Code's auto-compact limit (your context window minus 33k), so they fit whatever window your model has, and a model switch rescales them.
+Setup saves its own shares in your profile.
+To pin an absolute value instead, set it on the install screen, in `/config`, or in `settings.json` under `pluginConfigs["last-words"].options`.
 
-| Setting | Environment variable | Default | Meaning |
+| Setting | Environment variable | Default (share of the limit · on a 1M window) | Meaning |
 | --- | --- | --- | --- |
-| `nudge_1_k` | `LAST_WORDS_NUDGES_K` (all three, comma-separated) | `400` | First nudge, in thousands of tokens: take the next natural break |
-| `nudge_2_k` | | `700` | Second nudge: drive to a break |
-| `nudge_3_k` | | `850` | Third nudge: compact at the first safe point. Keep it below your auto-compaction threshold |
-| `sub_nudge_1_k` | `LAST_WORDS_SUB_NUDGES_K` (all three, comma-separated) | `350` | A subagent's first nudge: write a progress file when its task is done |
-| `sub_nudge_2_k` | | `500` | Second: drive to a handoff point, write the progress file, report ready to be replaced |
-| `sub_nudge_3_k` | | `700` | Third: stop at the first safe point, write the progress file, report |
+| `nudge_1_k` | `LAST_WORDS_NUDGES_K` (all three, comma-separated) | 41% · 400k | First nudge, in thousands of tokens: take the next natural break |
+| `nudge_2_k` | | 72% · 700k | Second nudge: drive to a break |
+| `nudge_3_k` | | 88% · 850k | Third nudge: compact at the first safe point. Keep it below your auto-compaction threshold |
+| `sub_nudge_1_k` | `LAST_WORDS_SUB_NUDGES_K` (all three, comma-separated) | 36% · 350k | A subagent's first nudge: write a progress file when its task is done |
+| `sub_nudge_2_k` | | 52% · 500k | Second: drive to a handoff point, write the progress file, report ready to be replaced |
+| `sub_nudge_3_k` | | 72% · 700k | Third: stop at the first safe point, write the progress file, report |
 | `resume_hold` | `LAST_WORDS_RESUME_HOLD` | on | Hold the main thread's first SendMessage to a big subagent once, with advice; sending again goes through |
 | `resume_hold_k` | `LAST_WORDS_RESUME_HOLD_K` | first subagent nudge | Subagent size from which a resume is held |
-| `cooldown_k` | `LAST_WORDS_COOLDOWN_K` | `100` | Minimum growth since the last compaction before another is accepted, and before nudges resume |
+| `cooldown_k` | `LAST_WORDS_COOLDOWN_K` | 10% · 100k | Minimum growth since the last compaction before another is accepted, and before nudges resume |
 | `snapshot` | `LAST_WORDS_SNAPSHOT` (`1` for on) | off | Archive the full transcript as a resumable session before each compaction |
 | `idle_handoff` | `LAST_WORDS_IDLE_HANDOFF` (`0` for off) | on | Turn Claude Code's idle compaction into a handoff request |
 | `snapshot_keep` | `LAST_WORDS_SNAPSHOT_KEEP` | `10` | Snapshots kept per session; older ones are deleted. `0` keeps all |
+| | `LAST_WORDS_PROJECTS_DIR` | `~/.claude/projects` | The history folder setup scans. Mostly for testing setup on a fixture folder |
+| | `LAST_WORDS_HOME` | `~/.claude/last-words` | Where the mod keeps profiles, setup files, handoffs, briefs and snapshots' file copies. Mostly for testing |
 | | `LAST_WORDS_DEBUG_LOG` | unset | Path of a trace file listing requests, arrivals, turn ends and notes |
 
-Each value comes from the plugin settings first, then the environment, then the default.
+On a 200k window the default levels come to about 69k, 121k and 147k, with a 17k cooldown.
+Each value comes from the plugin settings first, then the environment, then the project's setup profile, then your user-wide profile, then the default share.
+A setting or environment value counts as yours, so it outranks any profile; that's why setup never writes them.
 The levels must rise from first to third; if they don't, the defaults apply and `/auto-compact status` says so.
-On a 200k-context model, something like `80 / 120 / 150` with a `40` cooldown is a sensible start.
 
-The nudge notes, the tool description and `/auto-compact status` all quote the levels in force, so the skill never has to guess.
+The nudge notes, the tool description and `/auto-compact status` all quote the levels in force, in tokens, so the skill never has to guess.
 
 ## Troubleshooting
 
@@ -204,7 +247,9 @@ The nudge notes, the tool description and `/auto-compact status` all quote the l
 ## How it's built
 
 - `hooks/register.ts`: the mod, with the tool, the turn-end compaction, the snapshot, the re-entry note, the nudges and the commands.
+- `hooks/scan.ts`: setup's local history scan and message sampler.
 - `skills/compaction-handoff/SKILL.md`: the playbook I follow.
+- `skills/setup/SKILL.md` and `skills/setup/templates.md`: how I run setup, and the nine templates it starts from.
 - `types/index.d.ts`: the session state contract.
 - `.claude-plugin/plugin.json`: the manifest, including the threshold settings.
 
@@ -212,7 +257,7 @@ Plugin hook modules are an early-access Claude Code API, so a future release may
 
 ## Tell me how you compact
 
-The examples in the skill lean toward long, multi-agent sessions with review gates.
+The skill's built-in examples lean toward long, multi-agent sessions with review gates, and setup's nine templates are educated guesses about everyone else.
 Your way of working is probably different, and I'd like to learn it.
 
 - **Compaction strategies** for other working styles: pair-programming sessions, long research threads, review-heavy flows, many small tasks in one session.

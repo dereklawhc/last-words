@@ -1,7 +1,7 @@
 {
   "name": "last-words",
-  "version": "0.5.0",
-  "description": "Claude-managed compaction: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files.",
+  "version": "0.6.0",
+  "description": "Claude-managed compaction: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files. Setup tailors the strategy and thresholds to how you work.",
   "author": {
     "name": "Derek Law"
   },
@@ -10,62 +10,62 @@
     "nudge_1_k": {
       "type": "number",
       "title": "First nudge (thousands of tokens)",
-      "description": "Context size at which Claude is told to take the next natural handoff point. Leave empty for the default, 400."
+      "description": "Context size at which Claude is told to take the next natural handoff point. Leave empty to use the strategy profile, else the default: 41% of the auto-compact threshold (400 on a 1M window)."
     },
     "nudge_2_k": {
       "type": "number",
       "title": "Second nudge (thousands of tokens)",
-      "description": "Context size at which Claude is told to drive to a handoff point. Leave empty for the default, 700."
+      "description": "Context size at which Claude is told to drive to a handoff point. Leave empty to use the strategy profile, else the default: 72% of the auto-compact threshold (700 on a 1M window)."
     },
     "nudge_3_k": {
       "type": "number",
       "title": "Third nudge (thousands of tokens)",
-      "description": "Context size at which Claude is told to compact at the first safe point. Keep it below your auto-compaction threshold. Leave empty for the default, 850."
+      "description": "Context size at which Claude is told to compact at the first safe point. Keep it below your auto-compaction threshold. Leave empty to use the strategy profile, else the default: 88% of the auto-compact threshold (850 on a 1M window)."
     },
     "sub_nudge_1_k": {
       "type": "number",
       "title": "Subagent first nudge (thousands of tokens)",
-      "description": "Subagent context size at which it is told to write a progress file when its task is done, so the main thread can replace it with a fresh agent. Leave empty for the default, 350."
+      "description": "Subagent context size at which it is told to write a progress file when its task is done, so the main thread can replace it with a fresh agent. Leave empty to use the strategy profile, else the default: 36% of the auto-compact threshold (350 on a 1M window)."
     },
     "sub_nudge_2_k": {
       "type": "number",
       "title": "Subagent second nudge (thousands of tokens)",
-      "description": "Subagent context size at which it is told to drive to a handoff point, write its progress file and report. Leave empty for the default, 500."
+      "description": "Subagent context size at which it is told to drive to a handoff point, write its progress file and report. Leave empty to use the strategy profile, else the default: 52% of the auto-compact threshold (500 on a 1M window)."
     },
     "sub_nudge_3_k": {
       "type": "number",
       "title": "Subagent third nudge (thousands of tokens)",
-      "description": "Subagent context size at which it is told to stop at the first safe point, write its progress file and report. Keep it below your auto-compaction threshold. Leave empty for the default, 700."
+      "description": "Subagent context size at which it is told to stop at the first safe point, write its progress file and report. Keep it below your auto-compaction threshold. Leave empty to use the strategy profile, else the default: 72% of the auto-compact threshold (700 on a 1M window)."
     },
     "resume_hold": {
       "type": "boolean",
       "title": "Hold a resume of a big subagent once",
-      "description": "When the main thread messages a subagent past the hold size, refuse that first call with advice (a fresh agent from its progress file, or send again to resume it). The same call sent again goes through. On unless turned off here or with LAST_WORDS_RESUME_HOLD=0."
+      "description": "When the main thread messages a subagent past the hold size, refuse that first call with advice (a fresh agent from its progress file, or send again to resume it). The same call sent again goes through. On unless turned off here, with LAST_WORDS_RESUME_HOLD=0, or by the strategy profile."
     },
     "resume_hold_k": {
       "type": "number",
       "title": "Resume hold size (thousands of tokens)",
-      "description": "Subagent context size from which a resume is held once. Leave empty to use the subagent first nudge (default 350)."
+      "description": "Subagent context size from which a resume is held once. Leave empty to use the subagent first nudge."
     },
     "cooldown_k": {
       "type": "number",
       "title": "Cooldown (thousands of tokens)",
-      "description": "Minimum context growth since the last compaction before Claude may request another, and before nudges resume. Leave empty for the default, 100."
+      "description": "Minimum context growth since the last compaction before Claude may request another, and before nudges resume. Leave empty to use the strategy profile, else the default: 10% of the auto-compact threshold (100 on a 1M window)."
     },
     "snapshot": {
       "type": "boolean",
       "title": "Pre-compact snapshots",
-      "description": "Before each compaction, archive the full transcript as its own session in claude --resume, with copies of the handoff files. Off unless turned on here or with LAST_WORDS_SNAPSHOT=1."
+      "description": "Before each compaction, archive the full transcript as its own session in claude --resume, with copies of the handoff files. Off unless turned on here, with LAST_WORDS_SNAPSHOT=1, or by the strategy profile."
     },
     "snapshot_keep": {
       "type": "number",
       "title": "Snapshots to keep per session",
-      "description": "When snapshots are on, keep this many of each session's newest snapshots and delete older ones. 0 keeps all. Leave empty for the default, 10."
+      "description": "When snapshots are on, keep this many of each session's newest snapshots and delete older ones. 0 keeps all. Leave empty to use the strategy profile, else 10."
     },
     "idle_handoff": {
       "type": "boolean",
       "title": "Handoff before idle compaction",
-      "description": "When Claude Code's idle compaction is about to run, call it off and ask Claude to write a handoff and request compaction instead, while the prompt cache is still warm. On unless turned off here or with LAST_WORDS_IDLE_HANDOFF=0."
+      "description": "When Claude Code's idle compaction is about to run, call it off and ask Claude to write a handoff and request compaction instead, while the prompt cache is still warm. On unless turned off here, with LAST_WORDS_IDLE_HANDOFF=0, or by the strategy profile."
     }
   }
 }

@@ -1,13 +1,20 @@
 import { atom, read, update } from 'claude-code'
 import type { PluginOptions, Register } from 'claude-code'
 
-import type { AfterMode, CompactionRequest, HcAgents, HcInbound, HcReads, HcState, HcTurns, RereadItem } from '../types'
+import type { AfterMode, CompactionRequest, HcAgents, HcInbound, HcReads, HcState, HcTurns, HcWindow, LoadedProfile, RereadItem, SetupRecord, StrategyProfile } from '../types'
+import { deleteSamples, digest, projectKey, sample, scan } from './scan'
 
 const PLUGIN = 'last-words'
 const SKILL = `${PLUGIN}:compaction-handoff`
-const DEFAULT_NUDGES = [400_000, 700_000, 850_000]
-const DEFAULT_COOLDOWN = 100_000
-const DEFAULT_SUB_NUDGES = [350_000, 500_000, 700_000]
+const SETUP_SKILL = `${PLUGIN}:setup`
+// Levels and the cooldown are shares of the engine's auto-compact threshold. The defaults are the shares that give
+// the original absolute numbers at 967k (a 1M window): 400k / 700k / 850k, cooldown 100k, subagents 350k / 500k / 700k.
+const REFERENCE_THRESHOLD = 967_000
+const DEFAULT_SHARES = [400, 700, 850].map(k => (k * 1000) / REFERENCE_THRESHOLD)
+const DEFAULT_COOLDOWN_SHARE = 100_000 / REFERENCE_THRESHOLD
+const DEFAULT_SUB_SHARES = [350, 500, 700].map(k => (k * 1000) / REFERENCE_THRESHOLD)
+// The engine's auto-compact threshold is always its compaction window minus this buffer.
+const AUTOCOMPACT_BUFFER = 33_000
 const DEFAULT_SNAPSHOT_KEEP = 10
 // The plugin's userConfig values, set at install or in the config menu; a change reloads the module.
 let configured: PluginOptions = {}
@@ -32,6 +39,10 @@ const NO_READS: HcReads = { armed: false, started: false, files: [] }
 const rd = atom({ plugin: 'last-words', key: 'reads' } as const, NO_READS, { shape: 'rd-1' })
 const NO_AGENTS: HcAgents = { byId: {} }
 const ag = atom({ plugin: 'last-words', key: 'agents' } as const, NO_AGENTS, { shape: 'ag-1' })
+const NO_WINDOW: HcWindow = { threshold: REFERENCE_THRESHOLD, window: REFERENCE_THRESHOLD + AUTOCOMPACT_BUFFER, source: 'fallback', at: 0 }
+const wn = atom({ plugin: 'last-words', key: 'win' } as const, NO_WINDOW, { shape: 'wn-1' })
+// Whether the threshold was re-read once after a failed first reading.
+let windowRetried = false
 // Subagent nudges waiting for the agent's next tool result, by agent id: the level to record once delivered.
 const pendingSub = new Map<string, number>()
 // Claude Code's idle compaction fires about 54 minutes after the last activity; anything idle this long counts.
@@ -48,15 +59,28 @@ const TOOL_DESCRIPTION_LINES = [
   `For the full protocol (when to compact, what the handoff holds) load the skill ${SKILL}.`,
 ]
 
-function toolDescription(lim: Limits): string {
-  const [a, b, c] = lim.nudges.map(t => fmtK(t))
-  return [...TOOL_DESCRIPTION_LINES, `This session's nudge levels: ${a} (take the next natural handoff point), ${b} (drive to one), ${c} (compact at the first safe point); cooldown ${fmtK(lim.cooldown)} of growth after a compaction.`].join(' ')
+async function toolDescription($: any): Promise<string> {
+  const lim = await limits($)
+  const [a, b, c] = lim.nudges.map(t => (t === null ? 'off' : fmtK(t)))
+  const lines = [...TOOL_DESCRIPTION_LINES, `This session's nudge levels: ${a} (take the next natural handoff point), ${b} (drive to one), ${c} (compact at the first safe point); cooldown ${fmtK(lim.cooldown)} of growth after a compaction.`]
+  if (strategyProfile(await profiles($))) {
+    lines.push('The user approved a compaction strategy for this project (the "Compaction strategy (last-words)" section of your instructions); it comes after their own words and before the skill\'s built-in moments.')
+    const hw = await handoffWords($)
+    if (hw) lines.push(`Under it the handoff lives ${hw}.`)
+    const after = await defaultAfter($)
+    if (after) lines.push(`Its default after mode is "${after}".`)
+  }
+  return lines.join(' ')
+}
+
+async function registerCompactionTool($: any) {
+  await $.tool.register({ name: 'request_compaction', description: await toolDescription($), inputSchema: INPUT_SCHEMA, isDeferred: false })
 }
 
 const INPUT_SCHEMA = {
   type: 'object',
   properties: {
-    handoff: { type: 'string', description: 'Path of the handoff file (absolute, or relative to the session directory). Always re-read in full after compaction.' },
+    handoff: { type: 'string', description: 'Path of the handoff file (absolute, or relative to the session directory), or "mod" for the mod-owned handoff of this project (~/.claude/last-words/handoffs/<project key>/handoff.md). Always re-read in full after compaction.' },
     reread: {
       type: 'array',
       description: 'Other files to re-read after compaction, most important first (not the handoff, which is always read first).',
@@ -124,15 +148,18 @@ async function snapshotsOn($: any): Promise<boolean> {
   const v = configured['snapshot']
   if (typeof v === 'boolean') return v
   const env = ((await $.env.get('LAST_WORDS_SNAPSHOT')) ?? '').trim().toLowerCase()
-  return ['1', 'true', 'on', 'yes'].includes(env)
+  if (env !== '') return ['1', 'true', 'on', 'yes'].includes(env)
+  return (await fromProfile($, 'snapshot'))?.[0] === true
 }
 
-// Whether idle compactions are turned into a handoff request: the setting, else LAST_WORDS_IDLE_HANDOFF, else on.
+// Whether idle compactions are turned into a handoff request: the setting, else LAST_WORDS_IDLE_HANDOFF, else the
+// profile, else on.
 async function idleHandoffOn($: any): Promise<boolean> {
   const v = configured['idle_handoff']
   if (typeof v === 'boolean') return v
   const env = ((await $.env.get('LAST_WORDS_IDLE_HANDOFF')) ?? '').trim().toLowerCase()
-  return !['0', 'false', 'off', 'no'].includes(env)
+  if (env !== '') return !['0', 'false', 'off', 'no'].includes(env)
+  return (await fromProfile($, 'idle_handoff'))?.[0] !== false
 }
 
 // A compaction nobody in the session asked for, after a long quiet spell: Claude Code's idle timer.
@@ -175,7 +202,24 @@ async function submitIdle($: any, idleMs: number) {
   }
 }
 
-type Limits = { nudges: number[]; cooldown: number; invalid: boolean; subNudges: number[]; subInvalid: boolean }
+// Where a resolved value came from, for /auto-compact status.
+type Source = 'setting' | 'env' | 'project profile' | 'user profile' | 'default share'
+
+type Limits = {
+  /** The three nudge levels in tokens; null for a level the profile turned off. */
+  nudges: (number | null)[]
+  nudgeSources: Source[]
+  cooldown: number
+  cooldownSource: Source
+  invalid: boolean
+  subNudges: number[]
+  subSources: Source[]
+  subInvalid: boolean
+  /** False when the profile says `subagents: off`: no subagent nudges, report notes or resume hold. */
+  subagents: boolean
+  threshold: number
+  window: number
+}
 
 // Thousands of tokens from a userConfig field, or undefined when it is unset or not a positive number.
 function configK(key: string): number | undefined {
@@ -183,19 +227,328 @@ function configK(key: string): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v * 1000 : undefined
 }
 
-// Each value comes from the plugin's settings, else the environment, else the default.
+// Three comma-separated values in thousands of tokens, or undefined unless all three are positive numbers.
+function envTriple(raw: string | undefined): number[] | undefined {
+  const xs = (raw ?? '').split(',').map(x => Number(x.trim()) * 1000)
+  return xs.length === 3 && xs.every(x => Number.isFinite(x) && x > 0) ? xs : undefined
+}
+
+function rises(xs: (number | null)[]): boolean {
+  const on = xs.filter((x): x is number => x !== null)
+  return on.every((x, i) => i === 0 || x > on[i - 1]!)
+}
+
+// A profile value with its source: the project profile, else the user profile.
+async function fromProfile<K extends keyof StrategyProfile>($: any, key: K): Promise<[NonNullable<StrategyProfile[K]> | null, Source] | undefined> {
+  const p = await profiles($)
+  for (const [lp, src] of [[p.project, 'project profile'], [p.user, 'user profile']] as const) {
+    const v = lp?.values[key]
+    if (v !== undefined) return [v as NonNullable<StrategyProfile[K]> | null, src]
+  }
+  return undefined
+}
+
+// Each value comes from the plugin's settings, else the environment (absolute values the user set by hand), else the
+// project profile, else the user profile (shares of the auto-compact threshold), else the default share of it.
 async function limits($: any): Promise<Limits> {
-  const env = ((await $.env.get('LAST_WORDS_NUDGES_K')) ?? '').split(',').map((x: string) => Number(x.trim()) * 1000)
-  const envOk = env.length === 3 && env.every((x: number) => Number.isFinite(x) && x > 0)
-  const nudges = DEFAULT_NUDGES.map((d, i) => configK(`nudge_${i + 1}_k`) ?? (envOk ? env[i]! : d))
-  const rising = nudges.every((x, i) => i === 0 || x > nudges[i - 1]!)
+  const w = await read($, wn)
+  const T = w.threshold
+  const env = envTriple(await $.env.get('LAST_WORDS_NUDGES_K'))
+  const nudges: (number | null)[] = []
+  const nudgeSources: Source[] = []
+  for (let i = 0; i < 3; i++) {
+    const c = configK(`nudge_${i + 1}_k`)
+    const p = c === undefined && !env ? await fromProfile($, `nudge_${i + 1}` as 'nudge_1') : undefined
+    if (c !== undefined) { nudges.push(c); nudgeSources.push('setting') }
+    else if (env) { nudges.push(env[i]!); nudgeSources.push('env') }
+    else if (p) { nudges.push(p[0] === null ? null : Math.round(p[0] * T)); nudgeSources.push(p[1]) }
+    else { nudges.push(Math.round(DEFAULT_SHARES[i]! * T)); nudgeSources.push('default share') }
+  }
+  const rising = rises(nudges)
   const envCooldown = Number((await $.env.get('LAST_WORDS_COOLDOWN_K')) ?? '') * 1000
-  const cooldown = configK('cooldown_k') ?? (Number.isFinite(envCooldown) && envCooldown > 0 ? envCooldown : DEFAULT_COOLDOWN)
-  const subEnv = ((await $.env.get('LAST_WORDS_SUB_NUDGES_K')) ?? '').split(',').map((x: string) => Number(x.trim()) * 1000)
-  const subEnvOk = subEnv.length === 3 && subEnv.every((x: number) => Number.isFinite(x) && x > 0)
-  const subNudges = DEFAULT_SUB_NUDGES.map((d, i) => configK(`sub_nudge_${i + 1}_k`) ?? (subEnvOk ? subEnv[i]! : d))
-  const subRising = subNudges.every((x, i) => i === 0 || x > subNudges[i - 1]!)
-  return { nudges: rising ? nudges : DEFAULT_NUDGES, cooldown, invalid: !rising, subNudges: subRising ? subNudges : DEFAULT_SUB_NUDGES, subInvalid: !subRising }
+  let cooldown: number
+  let cooldownSource: Source
+  const cc = configK('cooldown_k')
+  const pc = await fromProfile($, 'cooldown')
+  if (cc !== undefined) { cooldown = cc; cooldownSource = 'setting' }
+  else if (Number.isFinite(envCooldown) && envCooldown > 0) { cooldown = envCooldown; cooldownSource = 'env' }
+  else if (pc && pc[0] !== null) { cooldown = Math.round(pc[0] * T); cooldownSource = pc[1] }
+  else { cooldown = Math.round(DEFAULT_COOLDOWN_SHARE * T); cooldownSource = 'default share' }
+  const subEnv = envTriple(await $.env.get('LAST_WORDS_SUB_NUDGES_K'))
+  const subNudges: number[] = []
+  const subSources: Source[] = []
+  for (let i = 0; i < 3; i++) {
+    const c = configK(`sub_nudge_${i + 1}_k`)
+    const p = c === undefined && !subEnv ? await fromProfile($, `sub_nudge_${i + 1}` as 'sub_nudge_1') : undefined
+    if (c !== undefined) { subNudges.push(c); subSources.push('setting') }
+    else if (subEnv) { subNudges.push(subEnv[i]!); subSources.push('env') }
+    else if (p && p[0] !== null) { subNudges.push(Math.round(p[0] * T)); subSources.push(p[1]) }
+    else { subNudges.push(Math.round(DEFAULT_SUB_SHARES[i]! * T)); subSources.push('default share') }
+  }
+  const subRising = rises(subNudges)
+  const subagents = (await fromProfile($, 'subagents'))?.[0] !== false
+  return {
+    nudges: rising ? nudges : DEFAULT_SHARES.map(x => Math.round(x * T)),
+    nudgeSources: rising ? nudgeSources : ['default share', 'default share', 'default share'],
+    cooldown,
+    cooldownSource,
+    invalid: !rising,
+    subNudges: subRising ? subNudges : DEFAULT_SUB_SHARES.map(x => Math.round(x * T)),
+    subSources: subRising ? subSources : ['default share', 'default share', 'default share'],
+    subInvalid: !subRising,
+    subagents,
+    threshold: T,
+    window: w.window,
+  }
+}
+
+function levelsText(nudges: (number | null)[]): string {
+  return nudges.map(t => (t === null ? 'off' : fmtK(t))).join(' / ')
+}
+
+// ---- The auto-compact threshold ----
+
+// Reads the engine's auto-compact threshold from the context breakdown (the summary sends no request), which follows
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW where context.window does not; on failure keeps the 967k fallback and says why.
+async function readWindow($: any): Promise<HcWindow> {
+  const now = await $.clock.now()
+  const model: string | undefined = await $.session.model().catch(() => undefined)
+  let w: HcWindow
+  try {
+    const u = await $.session.usage({ breakdown: 'summary' })
+    const b = u.context.breakdown
+    if (!b) throw new Error('the usage answer carried no breakdown')
+    const raw = typeof b.rawMaxTokens === 'number' && b.rawMaxTokens > 0 ? b.rawMaxTokens : undefined
+    const auto = typeof b.autoCompactThreshold === 'number' && b.autoCompactThreshold > 0 ? b.autoCompactThreshold : undefined
+    const threshold = auto ?? (raw !== undefined && raw > AUTOCOMPACT_BUFFER ? raw - AUTOCOMPACT_BUFFER : undefined)
+    if (threshold === undefined) throw new Error('the breakdown named no threshold or window')
+    w = {
+      threshold,
+      window: raw ?? threshold + AUTOCOMPACT_BUFFER,
+      source: 'breakdown',
+      windowSource: `${String(b.autocompactSource)}${auto === undefined ? '; auto-compaction off, so the window minus 33k' : ''}`,
+      ...(model ? { model } : {}),
+      at: now,
+    }
+  } catch (err: any) {
+    w = { ...NO_WINDOW, error: String(err?.message ?? err).slice(0, 200), ...(model ? { model } : {}), at: now }
+    $.ui.log(`${PLUGIN}: could not read the auto-compact threshold (${w.error}); using ${fmtK(REFERENCE_THRESHOLD)}`)
+  }
+  await update($, wn, () => w)
+  await dbg($, `window ${JSON.stringify(w)}`)
+  return w
+}
+
+// A model switch changes the window: re-reads the threshold when the model id differs from the last reading's, and
+// once more if the first reading failed; re-registers request_compaction when the threshold moved.
+async function ensureWindow($: any) {
+  const w = await read($, wn)
+  const model: string | undefined = await $.session.model().catch(() => undefined)
+  if ((model !== undefined && model !== w.model) || (w.source === 'fallback' && !windowRetried)) {
+    windowRetried = true
+    const nw = await readWindow($)
+    if (nw.threshold !== w.threshold) await registerCompactionTool($).catch(() => undefined)
+  }
+}
+
+// ---- Strategy profiles ----
+
+const PROFILE_KEYS = ['template', 'nudge_1', 'nudge_2', 'nudge_3', 'cooldown', 'subagents', 'sub_nudge_1', 'sub_nudge_2', 'sub_nudge_3', 'resume_hold', 'reread_budget', 'handoff', 'after', 'idle_handoff', 'snapshot', 'snapshot_keep', 'approved'] as const
+const PROFILE_HEADINGS = ['Moments', 'Not now', 'Handoff', 'After']
+const PROFILE_BODY_MAX_LINES = 40
+
+// The mod's own folder: LAST_WORDS_HOME, else ~/.claude/last-words.
+async function lwHome($: any): Promise<string> {
+  const o = ((await $.env.get('LAST_WORDS_HOME')) ?? '').trim()
+  if (o.startsWith('/')) return o.replace(/\/+$/, '')
+  return `${(await $.env.get('HOME')) ?? ''}/.claude/last-words`
+}
+
+// A share: a fraction above 0 and below 1, written as 0.41 or 41%.
+function parseShare(v: string): number | undefined {
+  const m = /^(\d+(?:\.\d+)?|\.\d+)\s*(%)?$/.exec(v)
+  if (!m) return undefined
+  const n = m[2] ? Number(m[1]) / 100 : Number(m[1])
+  return Number.isFinite(n) && n > 0 && n < 1 ? n : undefined
+}
+
+function parseOnOff(v: string): boolean | undefined {
+  const x = v.toLowerCase()
+  return x === 'on' ? true : x === 'off' ? false : undefined
+}
+
+// Parses a strategy profile in the format the spec fixes: front matter between --- lines, one `key: value` scalar per
+// line, then a body under 40 lines with the four headings. Returns the values and body, or every problem found.
+function parseProfile(text: string): { values: StrategyProfile; body: string } | { errors: string[] } {
+  const errors: string[] = []
+  const lines = text.replace(/^﻿/, '').replace(/\r\n/g, '\n').split('\n')
+  let i = 0
+  while (i < lines.length && lines[i]!.trim() === '') i++
+  if (lines[i]?.trim() !== '---') return { errors: ['it does not open with front matter (a --- line)'] }
+  const close = lines.findIndex((l, j) => j > i && l.trim() === '---')
+  if (close < 0) return { errors: ['its front matter has no closing --- line'] }
+  const v: StrategyProfile = {}
+  const seen = new Set<string>()
+  for (const raw of lines.slice(i + 1, close)) {
+    const line = raw.trim()
+    if (line === '' || line.startsWith('#')) continue
+    const m = /^([A-Za-z0-9_]+)\s*:\s*(.*)$/.exec(line)
+    if (!m) { errors.push(`front matter line "${line.slice(0, 60)}" is not key: value`); continue }
+    const key = m[1]!
+    const val = m[2]!.trim().replace(/^(["'])(.*)\1$/, '$2').trim()
+    if (!(PROFILE_KEYS as readonly string[]).includes(key)) { errors.push(`unknown key ${key}`); continue }
+    if (seen.has(key)) { errors.push(`${key} is set twice`); continue }
+    seen.add(key)
+    const bad = (what: string) => errors.push(`${key}: "${val.slice(0, 60)}" is not ${what}`)
+    switch (key) {
+      case 'template':
+        if (val === '' || val.length > 80) bad('a template name'); else v.template = val
+        break
+      case 'nudge_1': case 'nudge_2': case 'nudge_3': {
+        if (val.toLowerCase() === 'off') v[key] = null
+        else { const n = parseShare(val); if (n === undefined) bad('a share between 0 and 1 (or off)'); else v[key] = n }
+        break
+      }
+      case 'cooldown': case 'sub_nudge_1': case 'sub_nudge_2': case 'sub_nudge_3': case 'reread_budget': {
+        const n = parseShare(val)
+        if (n === undefined) bad('a share between 0 and 1'); else v[key] = n
+        break
+      }
+      case 'subagents': case 'resume_hold': case 'idle_handoff': case 'snapshot': {
+        const b = parseOnOff(val)
+        if (b === undefined) bad('on or off'); else v[key] = b
+        break
+      }
+      case 'handoff': {
+        const repo = /^repo:(.+)$/.exec(val)
+        if (val === 'mod') v.handoff = 'mod'
+        else if (repo && !repo[1]!.trim().startsWith('/') && !repo[1]!.split('/').includes('..')) v.handoff = `repo:${repo[1]!.trim()}`
+        else if (val.startsWith('/') && !val.split('/').includes('..')) v.handoff = val.replace(/\/+$/, '') || '/'
+        else bad('repo:<path in the repo>, mod, or an absolute folder')
+        break
+      }
+      case 'after':
+        if (val === 'continue' || val === 'discuss' || val === 'wait') v.after = val; else bad('continue, discuss or wait')
+        break
+      case 'snapshot_keep': {
+        const n = Number(val)
+        if (val === '' || !Number.isInteger(n) || n < 0) bad('a whole number (0 keeps all)'); else v.snapshot_keep = n
+        break
+      }
+      case 'approved':
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) bad('a date (YYYY-MM-DD)'); else v.approved = val
+        break
+    }
+  }
+  if (v.template === undefined && !errors.some(e => e.startsWith('template'))) errors.push('template is missing')
+  const nudges = [v.nudge_1, v.nudge_2, v.nudge_3].filter((x): x is number => typeof x === 'number')
+  if (!rises(nudges)) errors.push('the nudge levels do not rise from nudge_1 to nudge_3')
+  const subs = [v.sub_nudge_1, v.sub_nudge_2, v.sub_nudge_3].filter((x): x is number => typeof x === 'number')
+  if (!rises(subs)) errors.push('the subagent levels do not rise from sub_nudge_1 to sub_nudge_3')
+  const body = lines.slice(close + 1).join('\n').trim()
+  const bodyLines = body === '' ? 0 : body.split('\n').length
+  if (bodyLines >= PROFILE_BODY_MAX_LINES) errors.push(`the body has ${bodyLines} lines; keep it under ${PROFILE_BODY_MAX_LINES}`)
+  for (const h of PROFILE_HEADINGS) {
+    if (!new RegExp(`^##\\s+${h}\\s*$`, 'im').test(body)) errors.push(`the body has no "## ${h}" section`)
+  }
+  return errors.length ? { errors } : { values: v, body }
+}
+
+type Profiles = {
+  key: string
+  userPath: string
+  projectPath: string
+  user?: LoadedProfile
+  project?: LoadedProfile
+  /** Profiles that exist but were ignored, with why. */
+  invalid: { path: string; errors: string[] }[]
+}
+
+// Resolved at session.start and after setup_save; lazily after a hot reload.
+let profileCache: Profiles | undefined
+
+async function loadProfile($: any, scope: 'user' | 'project', path: string, invalid: Profiles['invalid']): Promise<LoadedProfile | undefined> {
+  if (!(await $.fs.exists(path))) return undefined
+  let text: string
+  try {
+    text = await $.fs.read(path)
+  } catch (err: any) {
+    invalid.push({ path, errors: [`it could not be read: ${String(err?.message ?? err).slice(0, 120)}`] })
+    return undefined
+  }
+  const parsed = parseProfile(text)
+  if ('errors' in parsed) {
+    invalid.push({ path, errors: parsed.errors })
+    $.ui.log(`${PLUGIN}: ignoring the strategy profile ${path}: ${parsed.errors.join('; ')}`)
+    return undefined
+  }
+  return { scope, path, values: parsed.values, body: parsed.body }
+}
+
+async function profiles($: any, reload = false): Promise<Profiles> {
+  if (profileCache && !reload) return profileCache
+  const home = await lwHome($)
+  const key = projectKey(await $.session.cwd())
+  const userPath = `${home}/strategy/user.md`
+  const projectPath = `${home}/strategy/projects/${key}.md`
+  const invalid: Profiles['invalid'] = []
+  const project = await loadProfile($, 'project', projectPath, invalid)
+  const user = await loadProfile($, 'user', userPath, invalid)
+  profileCache = { key, userPath, projectPath, ...(user ? { user } : {}), ...(project ? { project } : {}), invalid }
+  await dbg($, `profiles key=${key} project=${project ? 'yes' : 'no'} user=${user ? 'yes' : 'no'} invalid=${invalid.length}`)
+  return profileCache
+}
+
+// The profile whose body is the strategy in force: the project's, else the user's.
+function strategyProfile(p: Profiles): LoadedProfile | undefined {
+  return p.project ?? p.user
+}
+
+// Where the handoff lives under the profile, in words for the tool description and the strategy section.
+async function handoffWords($: any): Promise<string | undefined> {
+  const h = (await fromProfile($, 'handoff'))?.[0]
+  if (typeof h !== 'string') return undefined
+  if (h === 'mod') return `in the mod's folder: write it at ${await modHandoffPath($)} and pass handoff: "mod"`
+  if (h.startsWith('repo:')) return `in the repo at ${h.slice(5)} (relative to the session folder)`
+  return `in ${h}`
+}
+
+async function modHandoffPath($: any): Promise<string> {
+  return `${await lwHome($)}/handoffs/${projectKey(await $.session.cwd())}/handoff.md`
+}
+
+async function defaultAfter($: any): Promise<AfterMode | undefined> {
+  const a = (await fromProfile($, 'after'))?.[0]
+  return a === 'continue' || a === 'discuss' || a === 'wait' ? a : undefined
+}
+
+// The strategy section of the main thread's system prompt: the profile's body, headed with its place in the order of
+// precedence and the numbers in force.
+async function strategySection($: any): Promise<string | undefined> {
+  const p = await profiles($)
+  const lp = strategyProfile(p)
+  if (!lp) return undefined
+  const lim = await limits($)
+  const v = lp.values
+  const facts = [
+    `Nudge levels in force: ${levelsText(lim.nudges)} tokens; cooldown ${fmtK(lim.cooldown)} after a compaction (auto-compaction at ${fmtK(lim.threshold)}).`,
+  ]
+  const hw = await handoffWords($)
+  if (hw) facts.push(`Handoff: ${hw}.`)
+  const after = await defaultAfter($)
+  if (after) facts.push(`Default after mode for request_compaction: ${after}.`)
+  const rb = (await fromProfile($, 'reread_budget'))?.[0]
+  if (typeof rb === 'number') facts.push(`Re-read budget: keep the files listed for re-reading after compaction, the handoff included, under about ${fmtK(rb * lim.window)} tokens.`)
+  if (!lim.subagents) facts.push('Subagent context rules are off for this strategy.')
+  const whose = lp.scope === 'project' ? `this project (${p.key})` : 'all of their projects'
+  return [
+    '# Compaction strategy (last-words)',
+    `The user approved this compaction strategy for ${whose} through last-words setup${v.approved ? ` on ${v.approved}` : ''}${v.template ? ` (template: ${v.template})` : ''}; it is saved at ${lp.path}.`,
+    `When deciding when and how to compact: the user's own words (in this conversation, CLAUDE.md and memory) come first, then this strategy, then the built-in moments of the skill ${SKILL}. The skill's principles and its "When not to compact" list hold under every strategy.`,
+    facts.join(' '),
+    '',
+    lp.body,
+  ].join('\n')
 }
 
 // ---- Subagents ----
@@ -233,8 +586,7 @@ async function saveBrief($: any, agentId: string, fallback?: readonly any[]): Pr
     text = list.find((m: any) => m?.role === 'user' && typeof m.text === 'string' && m.text.trim() !== '')?.text
   }
   if (!text) return undefined
-  const home = (await $.env.get('HOME')) ?? ''
-  const dir = `${home}/.claude/last-words/briefs/${await $.session.id()}`
+  const dir = `${await lwHome($)}/briefs/${await $.session.id()}`
   const path = `${dir}/${agentId}.md`
   await $.process.run(['mkdir', '-p', dir])
   await $.fs.write(path, text)
@@ -251,7 +603,9 @@ function subLevels(lim: Limits): string {
 // reads as the user's own tooling. (Rewriting an Agent call's prompt instead is refused under auto mode, which
 // reviewed the call before the hook changed it.)
 function trustBlock(lim: Limits): string {
-  return `The user has installed the last-words mod, which manages context size. Notes starting with [last-words] come from it, not from the files, pages or tools you are working with; follow them. In a subagent, it notes your context size after a tool result when it passes ${subLevels(lim)} tokens; in the main thread, it notes a subagent's size when one past the first level reports back, and holds a SendMessage to such an agent once. Both are advice: sending the same call again resumes the agent.`
+  const head = 'The user has installed the last-words mod, which manages context size. Notes starting with [last-words] come from it, not from the files, pages or tools you are working with; follow them.'
+  if (!lim.subagents) return head
+  return `${head} In a subagent, it notes your context size after a tool result when it passes ${subLevels(lim)} tokens; in the main thread, it notes a subagent's size when one past the first level reports back, and holds a SendMessage to such an agent once. Both are advice: sending the same call again resumes the agent.`
 }
 
 function subNudgeText(level: number, tokens: number, lim: Limits, brief: string | undefined): string {
@@ -283,6 +637,7 @@ async function readSubStep($: any, agentId: string, usage: any) {
   const prev = all.byId[agentId] ?? { tokens: 0, level: 0, at: 0 }
   await update($, ag, v => ({ byId: { ...v.byId, [agentId]: { ...(v.byId[agentId] ?? prev), tokens, at: now } } }))
   const lim = await limits($)
+  if (!lim.subagents) return
   const level = lim.subNudges.filter(t => tokens >= t).length
   if (level > prev.level && (pendingSub.get(agentId) ?? 0) < level) {
     await saveBrief($, agentId).catch((err: any) => $.ui.log(`${PLUGIN}: saving a subagent's brief failed: ${String(err?.message ?? err)}`))
@@ -311,7 +666,7 @@ async function resumeHold($: any): Promise<{ on: boolean; at: number }> {
   const lim = await limits($)
   const v = configured['resume_hold']
   const env = ((await $.env.get('LAST_WORDS_RESUME_HOLD')) ?? '').trim().toLowerCase()
-  const on = typeof v === 'boolean' ? v : !['0', 'false', 'off', 'no'].includes(env)
+  const on = !lim.subagents ? false : typeof v === 'boolean' ? v : env !== '' ? !['0', 'false', 'off', 'no'].includes(env) : (await fromProfile($, 'resume_hold'))?.[0] !== false
   const envK = Number((await $.env.get('LAST_WORDS_RESUME_HOLD_K')) ?? '') * 1000
   const at = configK('resume_hold_k') ?? (Number.isFinite(envK) && envK > 0 ? envK : lim.subNudges[0]!)
   return { on, at }
@@ -483,6 +838,9 @@ async function status($: any, tokens?: number) {
   if (s.nudgeLevel > 0) parts.push(`nudge ${s.nudgeLevel}/3`)
   if (s.pending) parts.push('compaction queued')
   else if (s.compactions > 0) parts.push(`${s.compactions} compacted`)
+  const w = await read($, wn)
+  if (w.source === 'fallback' && w.at > 0) parts.push(`threshold unread, using ${fmtK(w.threshold)}`)
+  if (profileCache && profileCache.invalid.length > 0) parts.push('strategy profile ignored (see /auto-compact status)')
   $.ui.status(parts.join(' · '))
 }
 
@@ -500,11 +858,13 @@ async function validate($: any, input: any): Promise<{ deny: string } | { req: C
   if (!s.enabled) return { deny: 'Auto-compact is off for this session (/auto-compact on to turn it on).' }
   const cwd = await $.session.cwd()
   if (typeof input.handoff !== 'string' || input.handoff === '') return { deny: 'handoff is required.' }
-  const handoff = absPath(input.handoff, cwd)
+  // "mod" names the mod-owned handoff of this project, which a strategy profile may choose (handoff: mod).
+  const isMod = input.handoff.trim() === 'mod'
+  const handoff = isMod ? await modHandoffPath($) : absPath(input.handoff, cwd)
   const stat = await $.fs.stat(handoff, { resolve: true }).catch(() => undefined)
-  if (!stat || stat.kind !== 'file') return { deny: `The handoff file ${handoff} does not exist.` }
+  if (!stat || stat.kind !== 'file') return { deny: isMod ? `The mod's handoff file ${handoff} does not exist yet. Write it there with the Write tool, then call again.` : `The handoff file ${handoff} does not exist.` }
   const real = stat.realPath ?? handoff
-  if (TEMP_DIRS.some(d => real.startsWith(d))) {
+  if (!isMod && TEMP_DIRS.some(d => real.startsWith(d))) {
     return { deny: `The handoff ${real} is in a temporary folder, which gets deleted. Keep it in the repo (for example docs/handoff.md).` }
   }
   const inbound = await read($, ib)
@@ -575,31 +935,34 @@ async function snapshot($: any, n: number, tokens: number | undefined, req: Comp
   const row = JSON.stringify({ type: 'custom-title', customTitle: title, sessionId: snapId })
   await $.process.run(['sh', '-c', `printf '%s\\n' "$1" >> "$2"`, 'sh', row, dst])
   const home = (await $.env.get('HOME')) ?? ''
-  const dir = `${home}/.claude/last-words/snapshots/${snapId}`
+  const dir = `${await lwHome($)}/snapshots/${snapId}`
   const files = req ? [req.handoff, ...req.reread.map(r => r.path)] : []
   await $.fs.write(`${dir}/manifest.json`, JSON.stringify({ session: id, snapshot: snapId, title, transcript: dst, request: req, files }, null, 2))
   for (const [i, f] of files.entries()) {
     const name = `${String(i).padStart(2, '0')}-${f.split('/').pop()}`
     await $.process.run(['cp', f, `${dir}/${name}`]).catch(() => undefined)
   }
-  await prune($, id, home).catch((err: any) => $.ui.log(`${PLUGIN}: snapshot pruning failed: ${String(err?.message ?? err)}`))
+  await prune($, id, home, await lwHome($)).catch((err: any) => $.ui.log(`${PLUGIN}: snapshot pruning failed: ${String(err?.message ?? err)}`))
   return snapId
 }
 
-// How many snapshots to keep per session: the setting, else LAST_WORDS_SNAPSHOT_KEEP, else 10; 0 keeps all.
+// How many snapshots to keep per session: the setting, else LAST_WORDS_SNAPSHOT_KEEP, else the profile, else 10;
+// 0 keeps all.
 async function snapshotKeep($: any): Promise<number> {
   const v = configured['snapshot_keep']
   if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return v
   const raw = ((await $.env.get('LAST_WORDS_SNAPSHOT_KEEP')) ?? '').trim()
   const env = raw === '' ? NaN : Number(raw)
-  return Number.isInteger(env) && env >= 0 ? env : DEFAULT_SNAPSHOT_KEEP
+  if (Number.isInteger(env) && env >= 0) return env
+  const p = (await fromProfile($, 'snapshot_keep'))?.[0]
+  return typeof p === 'number' ? p : DEFAULT_SNAPSHOT_KEEP
 }
 
 // Deletes this session's oldest snapshots beyond the limit: the transcript copy and its folder of file copies.
-async function prune($: any, session: string, home: string) {
+async function prune($: any, session: string, home: string, lw: string) {
   const keep = await snapshotKeep($)
   if (keep === 0) return
-  const root = `${home}/.claude/last-words/snapshots`
+  const root = `${lw}/snapshots`
   const list = await $.process.run(['sh', '-c', 'ls -1t "$1"/*/manifest.json 2>/dev/null | xargs grep -lF -- "$2" 2>/dev/null', 'sh', root, `"session": "${session}"`])
   const manifests = list.stdout.split('\n').filter(Boolean)
   for (const m of manifests.slice(keep)) {
@@ -648,12 +1011,13 @@ async function nudge($: any, tokens: number) {
   if (!s.enabled || s.pending || s.inflight) return
   const { nudges, cooldown } = await limits($)
   if (s.lastPostTokens < 0 || tokens - s.lastPostTokens < cooldown) return
-  const level = nudges.filter(t => tokens >= t).length
+  // The highest level crossed; a level the profile turned off is never crossed.
+  const level = nudges.reduce<number>((lv, t, i) => (t !== null && tokens >= t ? i + 1 : lv), 0)
   if (level <= s.nudgeLevel) return
   await update($, st, v => ({ ...v, nudgeLevel: level }))
   const k = fmtK(tokens)
   const which = ['first', 'second', 'third'][level - 1] ?? 'third'
-  const head = `[last-words] Context is at ${k} tokens: the ${which} of three nudges (levels ${nudges.map(t => fmtK(t)).join(' / ')}).`
+  const head = `[last-words] Context is at ${k} tokens: the ${which} of three nudges (levels ${levelsText(nudges)}).`
   const texts = [
     `${head} Load the skill ${SKILL} if it is not loaded. At the next natural handoff point (previous wave reviewed and landed and the current wave briefed and started, or a phase closed), prepare the handoff and call request_compaction. Do not force one yet.`,
     `${head} Drive to a handoff point now: delegate remaining reviews and follow-ups, draft the briefs the next waves need while you have the full context, rewrite the handoff, then call request_compaction.`,
@@ -666,20 +1030,46 @@ async function nudge($: any, tokens: number) {
   }
 }
 
+function sourced(t: number | null, src: Source): string {
+  return `${t === null ? 'off' : fmtK(t)} (${src})`
+}
+
 async function statusText($: any): Promise<string> {
+  await ensureWindow($).catch(() => undefined)
   const s = await read($, st)
   const tokens = (await $.session.usage()).context.tokens
   const lim = await limits($)
+  const w = await read($, wn)
+  const p = await profiles($)
   const lines = [
     `auto-compact: ${s.enabled ? 'on' : 'off'} · context ${fmtK(tokens)} · compactions by this mod's session: ${s.compactions}`,
-    `nudges at ${lim.nudges.map(t => fmtK(t)).join(' / ')} (sent up to level ${s.nudgeLevel}); cooldown ${fmtK(lim.cooldown)} since the last compaction (${fmtK(s.lastPostTokens)} after it)`,
   ]
+  const lp = strategyProfile(p)
+  if (lp) {
+    lines.push(`strategy in force: ${lp.path} (${lp.scope} profile, template ${lp.values.template ?? '?'}, approved ${lp.values.approved ?? 'date not recorded'})${lp.scope === 'project' && p.user ? `; the user profile ${p.user.path} fills values the project profile leaves out` : ''}`)
+  } else {
+    const rec = await setupRecord($)
+    const how = !rec ? 'not offered yet' : rec.declined ? `declined ${rec.at.slice(0, 10)}` : rec.done ? `a profile was saved ${rec.at.slice(0, 10)} for another scope (${rec.path ?? '?'})` : `offered ${rec.at.slice(0, 10)}`
+    lines.push(`strategy: not set up for this project (${p.key}; ${how}); /last-words setup tailors one`)
+  }
+  for (const bad of p.invalid) lines.push(`ignored profile ${bad.path}: ${bad.errors.join('; ')}`)
+  lines.push(w.source === 'breakdown'
+    ? `auto-compact threshold: ${fmtK(w.threshold)} (read from the context breakdown${w.model ? ` for ${w.model}` : ''}; window ${fmtK(w.window)}, ${w.windowSource ?? '?'})`
+    : `auto-compact threshold: ${fmtK(w.threshold)}, the fallback: ${w.at === 0 ? 'not read yet' : `the context breakdown could not be read (${w.error ?? 'unknown error'})`}`)
+  lines.push(`nudges at ${lim.nudges.map((t, i) => sourced(t, lim.nudgeSources[i]!)).join(' / ')} (sent up to level ${s.nudgeLevel}); cooldown ${sourced(lim.cooldown, lim.cooldownSource)} since the last compaction (${fmtK(s.lastPostTokens)} after it)`)
+  const over = lim.nudges.filter((t): t is number => t !== null && t >= lim.threshold)
+  if (over.length) lines.push(`warning: nudge level${over.length > 1 ? 's' : ''} ${over.map(t => fmtK(t)).join(', ')} at or above the auto-compact threshold (${fmtK(lim.threshold)}) never fire before Claude Code compacts on its own`)
   const keep = await snapshotKeep($)
   lines.push(`idle compaction: ${(await idleHandoffOn($)) ? 'turned into a handoff request' : 'left to Claude Code'}`)
   lines.push(`pre-compact snapshots: ${(await snapshotsOn($)) ? `on, keeping ${keep === 0 ? 'all' : `the last ${keep}`} per session` : 'off'}`)
-  if (lim.invalid) lines.push('the configured nudge levels do not rise from first to third, so the defaults are in use')
-  lines.push(`subagent nudges at ${subLevels(lim)}${lim.subInvalid ? ' (the configured subagent levels do not rise, so the defaults are in use)' : ''}`)
-  const big = Object.entries((await read($, ag)).byId).filter(([, a]) => a.tokens >= lim.subNudges[0]!)
+  if (lim.invalid) lines.push('the configured nudge levels do not rise from first to third, so the default shares are in use')
+  if (lim.subagents) {
+    const hold = await resumeHold($)
+    lines.push(`subagent nudges at ${lim.subNudges.map((t, i) => sourced(t, lim.subSources[i]!)).join(' / ')}${lim.subInvalid ? ' (the configured subagent levels do not rise, so the default shares are in use)' : ''}; resume hold ${hold.on ? `on from ${fmtK(hold.at)}` : 'off'}`)
+  } else {
+    lines.push('subagent nudges, report notes and the resume hold: off (strategy profile)')
+  }
+  const big = lim.subagents ? Object.entries((await read($, ag)).byId).filter(([, a]) => a.tokens >= lim.subNudges[0]!) : []
   if (big.length) lines.push(`subagents past the first level: ${big.map(([id, a]) => `${id} ${fmtK(a.tokens)} (nudge ${a.level})`).join(', ')}`)
   if (s.pending) lines.push(`queued: handoff ${s.pending.handoff}, after=${s.pending.after}`)
   if (s.lastRequest) lines.push(`last handoff: ${s.lastRequest.handoff}`)
@@ -687,15 +1077,250 @@ async function statusText($: any): Promise<string> {
   return lines.join('\n')
 }
 
+// ---- Setup: the first-session offer, the setup tools and /last-words ----
+
+async function setupRecord($: any): Promise<SetupRecord | undefined> {
+  const r = await $.store.get('setup').catch(() => undefined)
+  return r && typeof r === 'object' && typeof (r as SetupRecord).at === 'string' ? (r as SetupRecord) : undefined
+}
+
+async function writeSetupRecord($: any, rec: Omit<SetupRecord, 'at'>) {
+  await $.store.set('setup', { at: new Date().toISOString(), ...rec })
+}
+
+// Wording as probed (probe 4): a hidden row appended at session.start made the offer after the task in 5 of 5 runs.
+const OFFER_NOTE = "[last-words] This user has not set up last-words (Claude-managed compaction) yet. After you finish the user's first request, offer last-words setup in one line: it tailors when and how this conversation gets compacted to how they work, and they can run /last-words setup whenever they like. Never offer it before the task is done, and do not offer it again in this session."
+
+// Once per install: with no setup record and no profile, record the offer, raise a toast and leave Claude a hidden note.
+async function maybeOffer($: any) {
+  if (await setupRecord($)) return
+  const p = await profiles($)
+  if (p.user || p.project || p.invalid.length > 0) return
+  await writeSetupRecord($, { via: 'offer' })
+  $.ui.toast('last-words: /last-words setup tailors compaction to how you work.', { timeoutMs: 10_000 })
+  await note($, OFFER_NOTE)
+  await dbg($, 'setup offered')
+}
+
+const SETUP_PROMPT = `Set up last-words (Claude-managed compaction) for me: load the skill ${SETUP_SKILL} and follow it from the start. (Sent by /last-words setup.)`
+
+async function projectsRoot($: any): Promise<string> {
+  const o = ((await $.env.get('LAST_WORDS_PROJECTS_DIR')) ?? '').trim()
+  return o.startsWith('/') ? o.replace(/\/+$/, '') : `${(await $.env.get('HOME')) ?? ''}/.claude/projects`
+}
+
+// A project named by its key, or by its folder (turned into the key).
+function asKey(x: string): string {
+  const t = x.trim()
+  return t.includes('/') ? projectKey(t) : t
+}
+
+const KEY_RE = /^[A-Za-z0-9-]{1,240}$/
+
+// Runs long work (a scan of every transcript) inside a tool call. The hook budget stands still while a `$` call is in
+// flight, but not while the scan's parser runs between its reads; keeping a cheap `$` wait in flight beside the work
+// keeps a long scan from overrunning the budget.
+async function long<T>($: any, work: Promise<T>): Promise<T> {
+  let done = false
+  work.then(() => { done = true }, () => { done = true })
+  while (!done) await Promise.race([work.catch(() => undefined), $.process.run(['sleep', '1']).catch(() => undefined)])
+  return work
+}
+
+function errText(err: any): string {
+  return String(err?.message ?? err).slice(0, 300)
+}
+
+const MAIN_ONLY = 'The setup tools are for the main thread only; a subagent reads the sample files it is given.'
+
+const SCAN_SCHEMA = {
+  type: 'object',
+  properties: {
+    projects: { type: 'array', items: { type: 'string' }, description: 'Project keys (as a previous digest lists them) or project folders to limit the scan to; all projects when absent.' },
+    since: { type: 'string', description: 'Only sessions active on or after this date (YYYY-MM-DD); all when absent.' },
+  },
+}
+const SCAN_DESCRIPTION = [
+  'last-words setup: scan this user\'s Claude Code transcripts locally and return a per-project digest: key, folder, sessions, size, last active, and a tentative work type with the features behind it.',
+  'It reads tool names, sizes, timestamps and slash commands, never message text, and writes a features file under ~/.claude/last-words/setup/.',
+  `Main thread only. Call it only after the user agreed to the scan in this session, as the skill ${SETUP_SKILL} describes.`,
+].join(' ')
+
+const SAMPLE_SCHEMA = {
+  type: 'object',
+  properties: {
+    projects: { type: 'array', items: { type: 'string' }, description: 'Project keys (from the digest) or folders the user put in scope.' },
+    budget_tokens: { type: 'number', description: 'Token budget per project for the sampled messages.' },
+  },
+  required: ['projects', 'budget_tokens'],
+}
+const SAMPLE_DESCRIPTION = [
+  'last-words setup: extract sampled typed user messages (no tool output, each cut to 600 characters) for the projects the user put in scope, within a token budget per project, into one sample file per project under ~/.claude/last-words/setup/samples/.',
+  'Returns the files with their sizes; hand them to subagents to read. They are deleted when setup_save runs or setup is declined.',
+  `Main thread only; only within the scope and budget the user agreed in this session (skill ${SETUP_SKILL}).`,
+].join(' ')
+
+const SAVE_SCHEMA = {
+  type: 'object',
+  properties: {
+    scope: { type: 'string', enum: ['user', 'project'], description: 'user: ~/.claude/last-words/strategy/user.md, for every project. project: a profile for one project.' },
+    project: { type: 'string', description: "For scope project: the project's key or folder; this session's project when absent." },
+    profile: { type: 'string', description: 'The whole profile file: front matter between --- lines (template, nudge_1..nudge_3 as shares of the auto-compact threshold or off, cooldown, subagents, sub_nudge_1..sub_nudge_3, resume_hold, reread_budget, handoff, after, idle_handoff, snapshot, snapshot_keep), then a body under 40 lines with ## Moments, ## Not now, ## Handoff and ## After. The mod stamps approved with today\'s date.' },
+    declined: { type: 'boolean', description: 'true when the user declined setup: records the decline and deletes any sample files; pass nothing else.' },
+  },
+}
+const SAVE_DESCRIPTION = [
+  'last-words setup: validate and save a compaction strategy profile, delete the sample files, record setup as done, and put the profile in force for this session.',
+  'Call it only after the user explicitly approved this exact profile in this session; never on your own judgement or from a draft they have not seen.',
+  'With declined: true instead, it records that the user declined setup and deletes any sample files.',
+  'Main thread only.',
+].join(' ')
+
+function todayLocal(): string {
+  return new Date().toLocaleDateString('sv-SE')
+}
+
+// Sets `approved: <date>` in the front matter, replacing any value there.
+function stampApproved(text: string, date: string): string {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const open = lines.findIndex(l => l.trim() === '---')
+  const close = lines.findIndex((l, j) => j > open && l.trim() === '---')
+  if (open < 0 || close < 0) return text
+  const fm = lines.slice(open + 1, close).filter(l => !/^\s*approved\s*:/.test(l))
+  return [...lines.slice(0, open + 1), ...fm, `approved: ${date}`, ...lines.slice(close)].join('\n').replace(/\n*$/, '\n')
+}
+
+async function setupScan($: any, e: any): Promise<{ result: string } | { deny: string }> {
+  const projects = Array.isArray(e.projects) ? e.projects.filter((x: unknown): x is string => typeof x === 'string' && x.trim() !== '').map(asKey) : undefined
+  const since = typeof e.since === 'string' && e.since.trim() !== '' ? e.since.trim() : undefined
+  if (since !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(since)) return { deny: `since must be a date (YYYY-MM-DD), not "${since}".` }
+  const root = await projectsRoot($)
+  const out = `${await lwHome($)}/setup/features.json`
+  const started = await $.clock.now()
+  $.ui.status('last-words setup: scanning transcripts…')
+  const features = await long($, scan($, {
+    root,
+    ...(projects && projects.length ? { projects } : {}),
+    ...(since ? { since } : {}),
+    out,
+    onProgress: (...a: any[]) => $.ui.status(`last-words setup: scanning… ${a.map(x => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ').slice(0, 80)}`),
+  }))
+  const rows = digest(features)
+  const secs = Math.round(((await $.clock.now()) - started) / 100) / 10
+  await status($)
+  await dbg($, `setup_scan ${rows.length} projects in ${secs}s`)
+  return {
+    result: [
+      `Scanned ${rows.length} project${rows.length === 1 ? '' : 's'} under ${root} in ${secs} s; the features file is ${out}. One project per line:`,
+      ...rows.map(r => JSON.stringify(r)),
+    ].join('\n'),
+  }
+}
+
+async function setupSample($: any, e: any): Promise<{ result: string } | { deny: string }> {
+  const projects = Array.isArray(e.projects) ? e.projects.filter((x: unknown): x is string => typeof x === 'string' && x.trim() !== '').map(asKey) : []
+  if (projects.length === 0) return { deny: 'projects is required: the project keys the user put in scope.' }
+  const bad = projects.filter((k: string) => !KEY_RE.test(k))
+  if (bad.length) return { deny: `Not project keys: ${bad.join(', ')}. Use the keys the digest lists.` }
+  const budget = Number(e.budget_tokens)
+  if (!Number.isFinite(budget) || budget <= 0) return { deny: 'budget_tokens must be a positive number: the per-project budget the user agreed.' }
+  const dir = `${await lwHome($)}/setup/samples`
+  $.ui.status('last-words setup: sampling messages…')
+  const files = await long($, sample($, { root: await projectsRoot($), projects, budgetTokens: Math.round(budget), dir }))
+  await status($)
+  await dbg($, `setup_sample ${files.length} files`)
+  if (files.length === 0) return { result: `No sample files were written: none of ${projects.join(', ')} had typed user messages under ${await projectsRoot($)}.` }
+  return {
+    result: [
+      `Wrote ${files.length} sample file${files.length === 1 ? '' : 's'} in ${dir} (deleted when setup_save runs or setup is declined):`,
+      ...files.map(f => `${f.path} — ${f.key}, about ${f.tokens < 10_000 ? f.tokens : fmtK(f.tokens)} tokens`),
+    ].join('\n'),
+  }
+}
+
+async function setupSave($: any, e: any): Promise<{ result: string } | { deny: string }> {
+  const lw = await lwHome($)
+  const samples = `${lw}/setup/samples`
+  if (e.declined === true) {
+    await deleteSamples($, samples).catch(() => undefined)
+    await writeSetupRecord($, { via: 'decline', declined: true })
+    await dbg($, 'setup declined (tool)')
+    return { result: 'Recorded that the user declined setup; the offer will not come again, and sample files (if any) are deleted. /last-words setup still runs it any time.' }
+  }
+  if (e.scope !== 'user' && e.scope !== 'project') return { deny: 'scope must be "user" or "project".' }
+  if (typeof e.profile !== 'string' || e.profile.trim() === '') return { deny: 'profile is required: the whole profile file the user approved.' }
+  const here = projectKey(await $.session.cwd())
+  const key = e.scope === 'project' ? (typeof e.project === 'string' && e.project.trim() !== '' ? asKey(e.project) : here) : undefined
+  if (key !== undefined && !KEY_RE.test(key)) return { deny: `"${key}" is not a project key.` }
+  const date = todayLocal()
+  const text = stampApproved(e.profile, date)
+  const parsed = parseProfile(text)
+  if ('errors' in parsed) return { deny: `The profile is not valid, so nothing was saved: ${parsed.errors.join('; ')}. Fix it, show the user the change if it is more than a typo, and call again.` }
+  const path = key === undefined ? `${lw}/strategy/user.md` : `${lw}/strategy/projects/${key}.md`
+  const replaced = await $.fs.exists(path)
+  await $.fs.write(path, text)
+  await deleteSamples($, samples).catch((err: any) => $.ui.log(`${PLUGIN}: deleting the sample files failed: ${errText(err)}`))
+  await writeSetupRecord($, { via: 'save', done: true, path })
+  await profiles($, true)
+  await registerCompactionTool($)
+  await status($)
+  await dbg($, `setup_save ${path}`)
+  const lim = await limits($)
+  const inForce = key === undefined || key === here
+  return {
+    result: [
+      `Saved the ${e.scope} profile at ${path}${replaced ? ' (replacing the previous one)' : ''}, approved ${date}. The sample files are deleted and setup is recorded as done.`,
+      inForce
+        ? `It is in force from now on in this session: nudges at ${levelsText(lim.nudges)}, cooldown ${fmtK(lim.cooldown)} (auto-compaction at ${fmtK(lim.threshold)}). /auto-compact status shows it.`
+        : `It applies to project ${key}, not this session's (${here}); sessions there pick it up when they start.`,
+    ].join(' '),
+  }
+}
+
 export const register: Register = (on, options) => {
   configured = options ?? {}
   on('session.start', async ($, e, next) => {
-    await $.tool.register({ name: 'request_compaction', description: toolDescription(await limits($)), inputSchema: INPUT_SCHEMA, isDeferred: false })
+    // Commands first: a prompt that arrives while the session is still starting finds them listed.
     await $.command.register({ name: 'auto-compact', description: 'Claude-managed compaction for this session: on, off or status', argumentHint: '[on|off|status]' })
     await $.command.register({ name: 'prepare-compact', description: 'Ask Claude to capture progress, rewrite the handoff and request compaction' })
+    await $.command.register({ name: 'last-words', description: 'Tailor when and how Claude compacts to how you work: setup, or setup decline to stop the offer', argumentHint: 'setup [decline]' })
+    await readWindow($)
+    await profiles($, true)
+    await registerCompactionTool($)
+    // The setup tools take the engine's default placement (behind ToolSearch where it defers MCP tools), so they cost
+    // no context in the sessions that never run setup.
+    await $.tool.register({ name: 'setup_scan', description: SCAN_DESCRIPTION, inputSchema: SCAN_SCHEMA })
+    await $.tool.register({ name: 'setup_sample', description: SAMPLE_DESCRIPTION, inputSchema: SAMPLE_SCHEMA })
+    await $.tool.register({ name: 'setup_save', description: SAVE_DESCRIPTION, inputSchema: SAVE_SCHEMA })
+    await maybeOffer($).catch((err: any) => $.ui.log(`${PLUGIN}: the setup offer failed: ${errText(err)}`))
     await status($)
     return next(e)
   })
+
+  // The approved strategy, as a system prompt section of the main thread (and forks); other subagents never render it.
+  on('prompt.compose', async ($, e, next) => {
+    const r = await next(e)
+    if (e.traits.includes('analysis')) return r
+    if (!(await read($, st)).enabled) return r
+    const text = await strategySection($)
+    if (!text) return r
+    return { sections: [...r.sections, { id: `${PLUGIN}:strategy`, text, scope: 'session' as const }] }
+  }).catch(($, e, next) => next(e))
+
+  // The setup tools (a pattern, since tools registered at run time are not in the generated tool-name types).
+  on('tool.call', { tool: /^mcp__last-words__setup_(scan|sample|save)$/ }, async ($, e) => {
+    const name = e.tool.replace('mcp__last-words__', '')
+    if ((e as any).agentId !== undefined) return { deny: MAIN_ONLY }
+    try {
+      if (name === 'setup_scan') return await setupScan($, e)
+      if (name === 'setup_sample') return await setupSample($, e)
+      return await setupSave($, e)
+    } catch (err: any) {
+      $.ui.log(`${PLUGIN}: ${name} failed: ${errText(err)}`)
+      await status($).catch(() => undefined)
+      return { deny: `${name} failed inside the last-words mod: ${errText(err)}` }
+    }
+  }).catch(($, e) => ({ deny: `${e.tool.replace('mcp__last-words__', '')} failed inside the last-words mod (it ran out of time or crashed).` }))
 
   // Every prompt, task notification and cross-session message that reaches the model passes here.
   on('prompt.submit', async ($, e, next) => {
@@ -782,11 +1407,13 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) {
       // A subagent finished a round: past the first level, its report gets a size note when it reaches the main thread.
       const a = (await read($, ag)).byId[e.agentId]
-      if (a && (await read($, st)).enabled && a.tokens >= (await limits($)).subNudges[0]!) pendingReport.set(e.agentId, a.tokens)
+      const lim = await limits($)
+      if (a && (await read($, st)).enabled && lim.subagents && a.tokens >= lim.subNudges[0]!) pendingReport.set(e.agentId, a.tokens)
       return out
     }
     const ended = await $.clock.now()
     await update($, tu, () => ({ running: false, endedAt: ended }))
+    await ensureWindow($)
     const s = await read($, st)
     const tokens = (await $.session.usage()).context.tokens ?? 0
     if (s.lastPostTokens < 0) await update($, st, v => ({ ...v, lastPostTokens: tokens }))
@@ -893,6 +1520,21 @@ export const register: Register = (on, options) => {
       await status($)
     }
     return { text: await statusText($) }
+  })
+
+  on('command.run', { command: 'last-words' }, async ($, e) => {
+    const args = e.args.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (args[0] === 'setup' && args[1] === 'decline') {
+      await deleteSamples($, `${await lwHome($)}/setup/samples`).catch(() => undefined)
+      await writeSetupRecord($, { via: 'decline', declined: true })
+      return { text: 'last-words setup declined: the offer will not come again. /last-words setup runs it whenever you like.' }
+    }
+    if (args[0] === 'setup' && args.length === 1) {
+      $.clock.after(50, () => void $.prompt.submit({ text: SETUP_PROMPT, asUser: true }))
+      return { text: 'Starting last-words setup.' }
+    }
+    const lp = strategyProfile(await profiles($))
+    return { text: [`Usage: /last-words setup (tailor compaction to how you work), /last-words setup decline (stop the offer).`, lp ? `Strategy in force: ${lp.path}.` : 'No strategy is set up for this project.'].join('\n') }
   })
 
   on('command.run', { command: 'prepare-compact' }, async $ => {
