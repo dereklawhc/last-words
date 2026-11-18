@@ -507,7 +507,7 @@ async function readMain($: Api, path: string, id: string, bytes: number, c: Coun
             s.imagePaths.add(input.file_path)
           }
           const bg = name === 'Bash' && input?.run_in_background === true
-          if (bg) s.backgroundRuns++
+          if (bg || name === 'Monitor' || name === 'TaskOutput') s.backgroundRuns++
           if (typeof b.id === 'string' && WAIT_TOOLS.has(name) && !bg) tools.set(b.id, { name, ts, bg })
         }
       }
@@ -850,16 +850,20 @@ export const CLASSIFY = {
   /** visual-iteration: image share (p90) at least, or browser-tool share at least. */
   visualImageShareP90: 0.25,
   visualBrowserShare: 0.2,
+  /** visual-iteration alternative: repeated reads of the same image per session at least. */
+  visualRereadsPerSession: 2,
   /** experiment-ops: bash share at least, edit share under, and waits (p90 of wait share) or long idle gaps (p90 of 30-min gaps) at least. */
   opsBashShare: 0.45,
   opsEditShareMax: 0.2,
   opsWaitShareP90: 0.15,
   opsIdleGaps30mP90: 1,
+  /** experiment-ops alternative: background runs, monitors and task-output waits per session at least. */
+  opsBackgroundPerSession: 1.5,
   /** data-wrangling and document-work: share of written files, with this many written files at least. */
   dataFileShare: 0.4,
   docFileShare: 0.5,
   filesMin: 3,
-  /** phased-research: web + read share at least, web share at least, edit share under, median prompts at least. */
+  /** phased-research (checked before document-work): web + read share of the steps Claude took itself (agent steps excluded) at least, web share at least, edit share under, median prompts at least. */
   researchReadWebShare: 0.45,
   researchWebShare: 0.08,
   researchEditShareMax: 0.25,
@@ -895,20 +899,23 @@ export function classify(p: Project): { type: string; evidence: string[] } {
       evidence: [`${f.subagents.count} subagents over ${p.sessions} sessions`, `agent tools ${pct(sh.agent)} of steps`, `${f.subagents.resumed} SendMessage reuses`],
     }
   }
-  if (f.imageShare.p90 >= T.visualImageShareP90 || sh.browser >= T.visualBrowserShare) {
+  if (f.imageShare.p90 >= T.visualImageShareP90 || sh.browser >= T.visualBrowserShare || (p.sessions > 0 && f.imageRereads / p.sessions >= T.visualRereadsPerSession)) {
     return { type: 'visual-iteration', evidence: [`images ${pct(f.imageShare.p90)} of context growth (p90)`, `browser and screenshot tools ${pct(sh.browser)} of steps`, `${f.imageRereads} repeated image reads`] }
   }
-  if (sh.bash >= T.opsBashShare && sh.edit < T.opsEditShareMax && (f.waitShare.p90 >= T.opsWaitShareP90 || f.idleGaps30m.p90 >= T.opsIdleGaps30mP90)) {
+  const bgPerSession = p.sessions ? f.backgroundRuns / p.sessions : 0
+  if (sh.bash >= T.opsBashShare && sh.edit < T.opsEditShareMax && (f.waitShare.p90 >= T.opsWaitShareP90 || f.idleGaps30m.p90 >= T.opsIdleGaps30mP90 || bgPerSession >= T.opsBackgroundPerSession)) {
     return { type: 'experiment-ops', evidence: [`Bash ${pct(sh.bash)} of steps, edits ${pct(sh.edit)}`, `waiting ${pct(f.waitShare.p90)} of wall time (p90)`, `${f.idleGaps30m.p90} gaps over 30 min per session (p90)`, `${f.backgroundRuns} background runs`] }
   }
   if (written >= T.filesMin && f.filesWritten.data / written >= T.dataFileShare) {
     return { type: 'data-wrangling', evidence: [`${f.filesWritten.data} of ${written} written files are data`, `Bash ${pct(sh.bash)} of steps`] }
   }
-  if (written >= T.filesMin && f.filesWritten.doc / written >= T.docFileShare) {
-    return { type: 'document-work', evidence: [`${f.filesWritten.doc} of ${written} written files are documents`, `median ${f.humanPrompts.p50} typed prompts per session`] }
-  }
-  if (sh.read + sh.web >= T.researchReadWebShare && sh.web >= T.researchWebShare && sh.edit < T.researchEditShareMax && f.humanPrompts.p50 >= T.researchPromptsP50) {
+  const ownSteps = 1 - sh.agent
+  const readWebOwn = ownSteps > 0 ? (sh.read + sh.web) / ownSteps : 0
+  if (readWebOwn >= T.researchReadWebShare && sh.web >= T.researchWebShare && sh.edit < T.researchEditShareMax && f.humanPrompts.p50 >= T.researchPromptsP50) {
     return { type: 'phased-research', evidence: [`web ${pct(sh.web)} and reads ${pct(sh.read)} of steps`, `edits ${pct(sh.edit)}`, `median ${f.humanPrompts.p50} typed prompts per session`] }
+  }
+  if (written >= T.filesMin && f.filesWritten.doc / written >= T.docFileShare && sh.web < T.researchWebShare) {
+    return { type: 'document-work', evidence: [`${f.filesWritten.doc} of ${written} written files are documents`, `median ${f.humanPrompts.p50} typed prompts per session`] }
   }
   if (sh.edit >= T.buildEditShare) {
     return { type: 'single-thread-build', evidence: [`edits ${pct(sh.edit)} and Bash ${pct(sh.bash)} of steps`, `${f.subagents.count} subagents`, `median ${f.humanPrompts.p50} typed prompts per session`] }
@@ -1061,7 +1068,7 @@ export async function sample($: Api, opts: SampleOptions): Promise<SampleFile[]>
         // skip an unreadable transcript
       }
     }
-    const head = `# Samples: ${key}\n\nTyped user messages only, each cut to ${SAMPLE_TEXT_CHARS} characters; session id and time per message; ${all.length} typed prompts in the project, about ${opts.budgetTokens} tokens of them below.\n`
+    const head = `# Samples: ${key}\n\nTyped user messages only, each cut to ${SAMPLE_TEXT_CHARS} characters; session id and time per message; ${all.length} typed prompts in the project, about @@USED@@ tokens of them below.\n`
     let used = Math.ceil(head.length / 4)
     const chosen = new Set<Cand>()
     const headed = new Set<Moment>()
@@ -1099,7 +1106,7 @@ export async function sample($: Api, opts: SampleOptions): Promise<SampleFile[]>
     // Leftover budget goes to moment prompts the first pass skipped.
     for (const m of MOMENT_ORDER) for (const i of order.get(m)!) if (!chosen.has(lists.get(m)![i]!)) take(lists.get(m)![i]!, opts.budgetTokens)
 
-    let body = head
+    let body = head.replace('@@USED@@', String(used))
     for (const m of [...MOMENT_ORDER, 'other' as Moment]) {
       const picked = lists.get(m)!.filter(c => chosen.has(c)).sort((a, b) => a.ts - b.ts)
       if (!picked.length) continue

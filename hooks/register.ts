@@ -64,7 +64,7 @@ async function toolDescription($: any): Promise<string> {
   const [a, b, c] = lim.nudges.map(t => (t === null ? 'off' : fmtK(t)))
   const lines = [...TOOL_DESCRIPTION_LINES, `This session's nudge levels: ${a} (take the next natural handoff point), ${b} (drive to one), ${c} (compact at the first safe point); cooldown ${fmtK(lim.cooldown)} of growth after a compaction.`]
   if (strategyProfile(await profiles($))) {
-    lines.push('The user approved a compaction strategy for this project (the "Compaction strategy (last-words)" section of your instructions); it comes after their own words and before the skill\'s built-in moments.')
+    lines.push('In the main thread, the user approved a compaction strategy for this project (the "Compaction strategy (last-words)" section of its instructions); it comes after their own words and before the skill\'s built-in moments. A subagent does not see that section and does not call this tool.')
     const hw = await handoffWords($)
     if (hw) lines.push(`Under it the handoff lives ${hw}.`)
     const after = await defaultAfter($)
@@ -1324,13 +1324,27 @@ export const register: Register = (on, options) => {
 
   // `handoff: mod` puts the handoff outside the project, so every write would ask. Allow the main thread's
   // Read, Write and Edit on exactly this project's mod handoff file; every other path goes on unchanged.
+  // Setup's reads lie outside the project too: the sample files (read by the reading subagents) and the setup skill's
+  // own templates file. Allow Read, for any agent, on files directly in the samples folder and on that one file.
   on('tool.check', { tool: /^(Read|Write|Edit)$/ }, async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
     const fp = (e.input as any)?.file_path
     if (typeof fp !== 'string') return next(e)
     const norm = (p: string) => p.replace(/\/+/g, '/')
-    if (norm(fp) !== norm(await modHandoffPath($))) return next(e)
-    return { decision: 'allow' as const, reason: "last-words: this project's handoff file in the mod's own folder" }
+    const path = norm(fp)
+    if (e.agentId === undefined && path === norm(await modHandoffPath($))) {
+      return { decision: 'allow' as const, reason: "last-words: this project's handoff file in the mod's own folder" }
+    }
+    if (e.tool === 'Read') {
+      const samples = norm(`${await lwHome($)}/setup/samples/`)
+      const rest = path.startsWith(samples) ? path.slice(samples.length) : ''
+      if (rest && !rest.includes('/') && rest.endsWith('.md') && !rest.includes('..')) {
+        return { decision: 'allow' as const, reason: 'last-words: a setup sample file' }
+      }
+      if (path === norm(`${$.plugin.root}/skills/setup/templates.md`)) {
+        return { decision: 'allow' as const, reason: "last-words: the setup skill's templates" }
+      }
+    }
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   // Every prompt, task notification and cross-session message that reaches the model passes here.
