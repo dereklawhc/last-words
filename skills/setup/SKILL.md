@@ -99,7 +99,7 @@ For each project or group, present:
 - **Not now:** the fixed "When not to compact" list applies everywhere; add only what this work needs (for example "during a discussion").
 - **Handoff:** where it lives (a path in the repo, `mod` for a folder the mod keeps per project, or a folder the user chooses), what it holds, and what to re-read after compaction.
 - **After compaction:** the `after` mode and when it changes.
-- **Numbers:** each level as a share of the auto-compact limit with what it means on this user's window. The limit is the window minus 33k: 967k on a 1M window, 167k on 200k. Read the user's models from the digest; ask if they mix window sizes. Example: "second nudge at 60% of the limit, 580k on your 1M window". Then the cooldown, the re-read budget (a share of the window), whether the subagent rules apply, idle handoff and snapshots.
+- **Numbers:** each level as a share of the auto-compact limit with what it means on this user's window. The limit is 967k on the 1M window, lower if the user set `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. Example: "second nudge at 60% of the limit, 580k on your 1M window". Then the cooldown, the re-read budget (a share of the window), whether the subagent rules apply, idle handoff and snapshots.
 - **Evidence:** behind each choice, the digest feature in words or a quote from the characterisation.
 
 Then ask only what the data cannot answer, each question with your recommendation: whether review gates are expected, whether sessions run while the user is away, where handoff notes should live, and anything the characterisations marked unclear.
@@ -132,6 +132,5 @@ When the user declined the scan or it found nothing, ask in one message:
 - Do you leave sessions running while you are away?
 - Should Claude stop at review gates for you to check?
 - Where should handoff notes live: in the repo, a folder you choose, or the mod's own folder?
-- Which model do you usually use?
 
 Then continue at step 6, with the user's answers as the evidence ("you said …").

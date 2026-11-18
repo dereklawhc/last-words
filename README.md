@@ -68,7 +68,7 @@ sequenceDiagram
 - 🧑‍🤝‍🧑 **Subagents get watched too.** Long-lived subagents quietly grow to 700k and beyond, because every resumed round re-sends everything. The mod measures each one per request and nudges it at 350k, 500k and 700k to write a progress file and report. When a big one reports back, I get told its size with the report, and my first attempt to resume it is held once with the same advice. Both are advice: sometimes I do want its full context, and sending again resumes it. The mod also keeps a verbatim copy of each big subagent's original brief, so a fresh agent gets the real brief and not my paraphrase of it. A subagent that still hits auto-compaction is told to re-read its brief and its notes. Nobody should have to remember 900k tokens of someone else's afternoon.
 - 🛡️ **Freshness guard.** A handoff older than the latest message, notification or subagent report is refused.
 - ✋ **Arrival guard.** If anything arrives between my request and the end of the turn, the compaction is called off. I fold the news into the handoff and ask again.
-- 📈 **Context nudges, at sizes you choose.** Three quiet notes as context grows: take the next natural break, then drive to one, then compact at the first safe point. The defaults scale with your context window: 400k, 700k and 850k on 1M, about 69k, 121k and 147k on 200k. Setup tunes them to your work, or set your own at install time or in `/config`. The notes never interrupt a turn. The status line shows which nudge you're on.
+- 📈 **Context nudges, at sizes you choose.** Three quiet notes as context grows: take the next natural break, then drive to one, then compact at the first safe point. The defaults are 400k, 700k and 850k on the 1M window, as shares of the auto-compact limit so `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is respected. Setup tunes them to your work, or set your own at install time or in `/config`. The notes never interrupt a turn. The status line shows which nudge you're on.
 - 🪡 **Setup, tailored to how you work.** One offer after your first task, or `/last-words setup` any time. With your consent the mod scans your history locally, subagents read the samples you choose, and I propose a compaction strategy per project from nine templates. Nothing is saved until you approve it. Details below.
 - 🧠 **A bundled playbook.** The `compaction-handoff` skill teaches me when to compact, when not to, and what a good handoff holds. It's plain Markdown: edit it to fit how you work.
 - 🙋 **Respects your gates.** If you asked for a pause or a review gate, I don't compact at it until you approve. Open questions go into the handoff instead of blocking.
@@ -136,7 +136,7 @@ claude plugin install last-words --marketplace dereklawhc/last-words
 
 In the desktop app: click **+** next to the prompt box → **Plugins** → **Add marketplace**, enter `dereklawhc/last-words`, then **Add plugin**.
 
-**Requirements:** Claude Code 2.1.325 or later, with plugin hook modules ("mods"). Tested on macOS; Linux should work but is untested. Setup's history scan needs macOS or Linux; everything else doesn't care.
+**Requirements:** Claude Code 2.1.325 or later, with plugin hook modules ("mods"). Built for models with the 1M context window, which is every model in the current Claude generation; smaller windows are not supported. Tested on macOS; Linux should work but is untested. Setup's history scan needs macOS or Linux; everything else doesn't care.
 
 ## Setup: fit it to how you work
 
@@ -230,7 +230,6 @@ To pin an absolute value instead, set it on the install screen, in `/config`, or
 | | `LAST_WORDS_HOME` | `~/.claude/last-words` | Where the mod keeps profiles, setup files, handoffs, briefs and snapshots' file copies. Mostly for testing |
 | | `LAST_WORDS_DEBUG_LOG` | unset | Path of a trace file listing requests, arrivals, turn ends and notes |
 
-On a 200k window the default levels come to about 69k, 121k and 147k, with a 17k cooldown.
 Each value comes from the plugin settings first, then the environment, then the project's setup profile, then your user-wide profile, then the default share.
 A setting or environment value counts as yours, so it outranks any profile; that's why setup never writes them.
 The levels must rise from first to third; if they don't, the defaults apply and `/auto-compact status` says so.

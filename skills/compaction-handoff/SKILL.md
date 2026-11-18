@@ -37,7 +37,7 @@ A question for the user never blocks compaction. Write it in the handoff's open-
 ## Urgency by context size
 
 The mod nudges you three times as context grows.
-Each note names its level and the session's configured sizes; the defaults are 400k, 700k and 850k tokens on a 1M window, scaled down on smaller windows, and an approved strategy may set others; `/auto-compact status` shows the current ones.
+Each note names its level and the session's configured sizes; the defaults are 400k, 700k and 850k tokens on the 1M window, and an approved strategy may set others; `/auto-compact status` shows the current ones.
 
 - **Before the first nudge:** compact only at a major phase boundary before a big next phase.
 - **After the first nudge:** take the next natural handoff point. Do not force one.

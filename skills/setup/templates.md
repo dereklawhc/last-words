@@ -24,27 +24,27 @@ Levels and the cooldown are shares of the engine's auto-compact limit, which is 
 The re-read budget is a share of the window.
 The shipped defaults as shares:
 
-| Value | Share | On a 1M window (limit 967k) | On a 200k window (limit 167k) |
-| --- | --- | --- | --- |
-| First nudge | 0.414 | 400k | 69k |
-| Second nudge | 0.724 | 700k | 121k |
-| Third nudge | 0.879 | 850k | 147k |
-| Cooldown | 0.103 | 100k | 17k |
-| Subagent nudges | 0.362 / 0.517 / 0.724 | 350k / 500k / 700k | 60k / 86k / 121k |
+| Value | Share | Tokens (limit 967k) |
+| --- | --- | --- |
+| First nudge | 0.414 | 400k |
+| Second nudge | 0.724 | 700k |
+| Third nudge | 0.879 | 850k |
+| Cooldown | 0.103 | 100k |
+| Subagent nudges | 0.362 / 0.517 / 0.724 | 350k / 500k / 700k |
 
-A 60–120k re-read is routine on a 1M window and most of a 200k one; size the budget to the window.
+A 60–120k re-read is routine; size the budget to the work, not to habit.
 An absolute value the user set in the plugin settings or the environment still wins over any profile.
 
 ## Templates
 
 Each entry: signature (what the scan and samples show), moments, numbers, handoff, after.
-"Defaults" means the table above. Token figures are on 1M / 200k windows.
+"Defaults" means the table above. Token figures are on the 1M window.
 
 ### Short tasks (`short-tasks`)
 
 - **Signature:** one or two human prompts per session, peaks under 30% of the window, frequent `/clear` or new sessions.
 - **Moments:** none. Between unrelated tasks, suggest `/clear`.
-- **Numbers:** the third level only, as a safety net: `nudge_1: off`, `nudge_2: off`, `nudge_3: 0.879` (850k / 147k). Subagent rules off unless subagents appear. Re-read budget 0.05 (50k / 10k).
+- **Numbers:** the third level only, as a safety net: `nudge_1: off`, `nudge_2: off`, `nudge_3: 0.879` (850k). Subagent rules off unless subagents appear. Re-read budget 0.05 (50k).
 - **Handoff:** none, unless a task runs long; then a short note in the mod's folder.
 - **After:** `continue`.
 
@@ -52,7 +52,7 @@ Each entry: signature (what the scan and samples show), moments, numbers, handof
 
 - **Signature:** many turns on one feature, mostly edits and shell commands, few subagents, regular commits.
 - **Moments:** after a commit with passing tests, before the next feature or step. Never mid-debug.
-- **Numbers:** defaults. Subagent rules off. Re-read budget 0.08 (80k / 16k).
+- **Numbers:** defaults. Subagent rules off. Re-read budget 0.08 (80k).
 - **Handoff:** light: goal, commits so far, next steps, open bugs. Re-read the handoff and the files in hand.
 - **After:** `continue`.
 
@@ -60,7 +60,7 @@ Each entry: signature (what the scan and samples show), moments, numbers, handof
 
 - **Signature:** many subagents, resumed agents, waves of briefs, review and commit cycles.
 - **Moments:** the shipped strategy: a build wave has started (previous wave reviewed and committed, briefs are files, agents running, later briefs drafted); a phase has closed; a long wait.
-- **Numbers:** defaults. Subagent rules on at the default shares, resume hold on. Re-read budget 0.12 (120k / 24k).
+- **Numbers:** defaults. Subagent rules on at the default shares, resume hold on. Re-read budget 0.12 (120k).
 - **Handoff:** the compaction-handoff skill's full contents, in the repo (`docs/handoff.md` unless `CLAUDE.md` names a path).
 - **After:** `continue`; `discuss` when a phase closes.
 
@@ -68,7 +68,7 @@ Each entry: signature (what the scan and samples show), moments, numbers, handof
 
 - **Signature:** heavy web search, fetching and reading; findings docs written; many human prompts in long discussions.
 - **Moments:** a discussion has concluded on one question, its answer is written up, and the conversation moves to the next question. Never before or during a discussion, which needs the full history.
-- **Numbers:** the second level earlier, so a discussion under way can finish before the third: 0.414 / 0.60 / 0.879 (400k / 580k / 850k; 69k / 100k / 147k), cooldown 0.103. Subagent rules on if research is delegated. Re-read budget 0.10 (100k / 20k).
+- **Numbers:** the second level earlier, so a discussion under way can finish before the third: 0.414 / 0.60 / 0.879 (400k / 580k / 850k), cooldown 0.103. Subagent rules on if research is delegated. Re-read budget 0.10 (100k).
 - **Handoff:** the findings doc is the source of truth; the handoff names what is settled and the question now open.
 - **After:** `continue` when the next question is already posed; `discuss` when the user has not opened it.
 
@@ -76,7 +76,7 @@ Each entry: signature (what the scan and samples show), moments, numbers, handof
 
 - **Signature:** long shell runs, background tasks and monitors, idle gaps over 30 minutes, logs read with `tail`, few edits.
 - **Moments:** a run has started and its monitor is armed; a run's results are written up. Never while a result is unread.
-- **Numbers:** defaults. Idle handoff on. Re-read budget 0.05 (50k / 10k).
+- **Numbers:** defaults. Idle handoff on. Re-read budget 0.05 (50k).
 - **Handoff:** run ids, exact commands, monitors and heartbeats to re-arm, where results land. A light re-read.
 - **After:** `continue`.
 
@@ -84,7 +84,7 @@ Each entry: signature (what the scan and samples show), moments, numbers, handof
 
 - **Signature:** a high image share from screenshots and browser tools, the same image paths re-read, short edit-and-check loops.
 - **Moments:** after an iteration the user accepted.
-- **Numbers:** lower, since images make growth fast and each one is stale after the next iteration: 0.30 / 0.55 / 0.80 (290k / 532k / 774k; 50k / 92k / 134k), cooldown 0.103. Re-read budget 0.05 (50k / 10k).
+- **Numbers:** lower, since images make growth fast and each one is stale after the next iteration: 0.30 / 0.55 / 0.80 (290k / 532k / 774k), cooldown 0.103. Re-read budget 0.05 (50k).
 - **Handoff:** the current state in words with paths to the accepted screenshots, never the images; open feedback items.
 - **After:** `continue`; `discuss` while a visual judgement from the user is pending.
 
@@ -92,7 +92,7 @@ Each entry: signature (what the scan and samples show), moments, numbers, handof
 
 - **Signature:** most writes are documents; large document reads and edits; many review rounds.
 - **Moments:** a section or chapter is done and accepted, before the next.
-- **Numbers:** defaults. Re-read budget 0.10 (100k / 20k).
+- **Numbers:** defaults. Re-read budget 0.10 (100k).
 - **Handoff:** the document holds the state; the handoff holds outline status, agreed style rules and open comments. Re-read the outline and the current section, not the whole document.
 - **After:** `continue`; `discuss` when the next section needs the user's direction.
 
@@ -100,7 +100,7 @@ Each entry: signature (what the scan and samples show), moments, numbers, handof
 
 - **Signature:** one session open for days, many unrelated short items (email, tickets, messages, data pulls), MCP-heavy, scheduled triggers, often no repo.
 - **Moments:** between items, with nothing mid-flight; when idle.
-- **Numbers:** a lower first level and a shorter cooldown, since there are no phases to wait for: 0.30 / 0.724 / 0.879 (290k / 700k / 850k; 50k / 121k / 147k), cooldown 0.05 (48k / 8k). Idle handoff on. Re-read budget 0.05 (50k / 10k).
+- **Numbers:** a lower first level and a shorter cooldown, since there are no phases to wait for: 0.30 / 0.724 / 0.879 (290k / 700k / 850k), cooldown 0.05 (48k). Idle handoff on. Re-read budget 0.05 (50k).
 - **Handoff:** a running ledger of standing state (open items, who is waiting, recurring routines), in the mod's folder by default.
 - **After:** `wait`; `continue` for a scheduled routine.
 
@@ -108,7 +108,7 @@ Each entry: signature (what the scan and samples show), moments, numbers, handof
 
 - **Signature:** CSV, SQL and notebook files; large tabular shell output; data files read.
 - **Moments:** after an analysis question is answered and its result saved to a file.
-- **Numbers:** defaults. The strategy also asks for truncated outputs (`head`, row limits). Re-read budget 0.08 (80k / 16k).
+- **Numbers:** defaults. The strategy also asks for truncated outputs (`head`, row limits). Re-read budget 0.08 (80k).
 - **Handoff:** questions answered with paths to their outputs, the pipeline steps, open questions.
 - **After:** `continue`.
 

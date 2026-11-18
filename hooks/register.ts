@@ -1322,6 +1322,17 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e) => ({ deny: `${e.tool.replace('mcp__last-words__', '')} failed inside the last-words mod (it ran out of time or crashed).` }))
 
+  // `handoff: mod` puts the handoff outside the project, so every write would ask. Allow the main thread's
+  // Read, Write and Edit on exactly this project's mod handoff file; every other path goes on unchanged.
+  on('tool.check', { tool: /^(Read|Write|Edit)$/ }, async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const fp = (e.input as any)?.file_path
+    if (typeof fp !== 'string') return next(e)
+    const norm = (p: string) => p.replace(/\/+/g, '/')
+    if (norm(fp) !== norm(await modHandoffPath($))) return next(e)
+    return { decision: 'allow' as const, reason: "last-words: this project's handoff file in the mod's own folder" }
+  }).catch(($, e, next) => next(e))
+
   // Every prompt, task notification and cross-session message that reaches the model passes here.
   on('prompt.submit', async ($, e, next) => {
     const origin: any = e.origin
