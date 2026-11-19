@@ -1096,6 +1096,13 @@ async function maybeOffer($: any) {
   if (await setupRecord($)) return
   const p = await profiles($)
   if (p.user || p.project || p.invalid.length > 0) return
+  // A plugin update or /reload-plugins re-runs session.start in sessions already at work, and a resumed session has
+  // turns too: offer only in a conversation with none yet, and leave the record unwritten otherwise.
+  const turns = await Promise.resolve($.session.turns()).catch(() => 0)
+  if (turns > 0) {
+    await dbg($, `setup offer skipped: the conversation already has ${turns} turns`)
+    return
+  }
   await writeSetupRecord($, { via: 'offer' })
   $.ui.toast('last-words: /last-words setup tailors compaction to how you work.', { timeoutMs: 10_000 })
   await note($, OFFER_NOTE)
