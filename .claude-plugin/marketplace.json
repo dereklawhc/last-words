@@ -1,5 +1,24 @@
 {
   "name": "last-words",
-  "owner": { "name": "Derek Law" },
-  "plugins": [{ "name": "last-words", "source": "./" }]
+  "owner": {
+    "name": "Derek Law"
+  },
+  "plugins": [
+    {
+      "name": "last-words",
+      "source": "./",
+      "description": "Claude-managed compaction for Claude Code: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files. Setup tailors the strategy and thresholds to how you work.",
+      "keywords": [
+        "claude-code",
+        "claude-code-plugin",
+        "compaction",
+        "auto-compact",
+        "context-window",
+        "context-management",
+        "handoff",
+        "subagents"
+      ]
+    }
+  ],
+  "description": "last-words: Claude-managed compaction for Claude Code."
 }

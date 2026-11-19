@@ -1,7 +1,17 @@
 {
   "name": "last-words",
-  "version": "0.6.2",
-  "description": "Claude-managed compaction: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files. Setup tailors the strategy and thresholds to how you work.",
+  "version": "0.6.3",
+  "description": "Claude-managed compaction for Claude Code: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files. Setup tailors the strategy and thresholds to how you work.",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "compaction",
+    "auto-compact",
+    "context-window",
+    "context-management",
+    "handoff",
+    "subagents"
+  ],
   "author": {
     "name": "Derek Law"
   },

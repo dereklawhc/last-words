@@ -1,4 +1,4 @@
-# last-words
+# last-words: Claude-managed compaction for Claude Code
 
 **Let me write right before I forget.**
 
