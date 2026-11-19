@@ -1229,12 +1229,35 @@ async function setupScan($: any, e: any): Promise<{ result: string } | { deny: s
   const secs = Math.round(((await $.clock.now()) - started) / 100) / 10
   await status($)
   await dbg($, `setup_scan ${rows.length} projects in ${secs}s`)
-  return {
-    result: [
-      `Scanned ${rows.length} project${rows.length === 1 ? '' : 's'} under ${root} in ${secs} s; the features file is ${out}. One project per line:`,
-      ...rows.map(r => JSON.stringify(r)),
-    ].join('\n'),
-  }
+  return { result: digestText(rows, root, out, secs, Boolean(projects && projects.length)) }
+}
+
+// Sandboxes and scratch folders (test harnesses, temporary runs) are not the user's work.
+const TEMP_CWD = /^(\/private)?\/(var\/folders|tmp)\/|\/scratchpad(\/|$)|\/Claude\/scratch-workspaces\//
+const DIGEST_MAX = 30
+
+// The digest as Claude reads it: the projects where compaction may matter, one line each, largest first and capped;
+// short-task projects and sandboxes folded into a count each. When the user named projects, every one is listed.
+function digestText(rows: any[], root: string, out: string, secs: number, named: boolean): string {
+  const mb = (n: number) => `${Math.max(1, Math.round(n / 1e6))} MB`
+  const line = (r: any) => [
+    r.key, r.cwd, `${r.sessions} session${r.sessions === 1 ? '' : 's'}`, mb(r.size), `last active ${String(r.lastActive ?? '').slice(0, 10)}`,
+    `peak ${Math.round((r.peakShareP90 ?? 0) * 100)}% (p90)`, `${r.autoCompacts} auto-compactions`, r.type, (r.evidence ?? []).filter(Boolean).join('; '),
+  ].join(' | ')
+  const head = `Scanned ${rows.length} project${rows.length === 1 ? '' : 's'} under ${root} in ${secs} s; the features file is ${out}.`
+  const fields = 'Fields: key | folder | sessions | size | last active | peak context | auto-compactions | tentative type | evidence.'
+  if (named) return [head, fields, ...rows.map(line)].join('\n')
+  const temp = rows.filter(r => TEMP_CWD.test(String(r.cwd ?? '')))
+  const rest = rows.filter(r => !TEMP_CWD.test(String(r.cwd ?? '')))
+  const short = rest.filter(r => r.type === 'short-tasks' && (r.peakShareP90 ?? 0) < 0.3 && !r.autoCompacts)
+  const main = rest.filter(r => !short.includes(r)).sort((a, b) => b.size - a.size)
+  const shown = main.slice(0, DIGEST_MAX)
+  const sum = (xs: any[]) => xs.reduce((n, r) => n + r.sessions, 0)
+  const lines = [head, fields, ...shown.map(line)]
+  if (main.length > shown.length) lines.push(`${main.length - shown.length} smaller projects where compaction may matter are not listed; setup_scan with their folders lists them.`)
+  if (short.length) lines.push(`${short.length} projects of short tasks (${sum(short)} sessions, peaks under 30%, no auto-compactions): compaction rarely matters there; not listed.`)
+  if (temp.length) lines.push(`${temp.length} sandbox or temporary-folder projects (${sum(temp)} sessions, test runs and scratch folders): not the user's own work; not listed.`)
+  return lines.join('\n')
 }
 
 async function setupSample($: any, e: any): Promise<{ result: string } | { deny: string }> {
