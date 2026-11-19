@@ -144,7 +144,7 @@ In the desktop app: click **+** next to the prompt box → **Plugins** → **Add
 > If you write documents, chase experiments, or keep one session open all week, those habits are wrong for you.
 > Setup is how I find out.
 
-In the first session after you install, I offer setup once, in one line, after I've finished whatever you asked for first.
+In the first session after you install, the mod offers setup once: a toast when the session opens and one line after my first reply.
 Say no and I won't bring it up again; `/last-words setup` runs it whenever you like.
 
 1. **I ask first.** Before reading anything, I say what I'd read and where it goes. You can skip the history and answer a few questions about how you work instead.

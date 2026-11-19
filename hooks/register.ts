@@ -1089,7 +1089,7 @@ async function writeSetupRecord($: any, rec: Omit<SetupRecord, 'at'>) {
 }
 
 // Wording as probed (probe 4): a hidden row appended at session.start made the offer after the task in 5 of 5 runs.
-const OFFER_NOTE = "[last-words] This user has not set up last-words (Claude-managed compaction) yet. After you finish the user's first request, offer last-words setup in one line: it tailors when and how this conversation gets compacted to how they work, and they can run /last-words setup whenever they like. Never offer it before the task is done, and do not offer it again in this session."
+const OFFER_LINE = "last-words: want compaction tailored to how you work? /last-words setup starts it (it asks before reading anything); /last-words setup decline stops this offer."
 
 // Once per install: with no setup record and no profile, record the offer, raise a toast and leave Claude a hidden note.
 async function maybeOffer($: any) {
@@ -1103,9 +1103,22 @@ async function maybeOffer($: any) {
     await dbg($, `setup offer skipped: the conversation already has ${turns} turns`)
     return
   }
-  await writeSetupRecord($, { via: 'offer' })
+  // The mod shows the offer itself, as a transcript line after the first reply: a note asking Claude to make it was
+  // dropped in the terminal (a row appended before the first message) or ignored (context on the first prompt).
+  offerPending = true
   $.ui.toast('last-words: /last-words setup tailors compaction to how you work.', { timeoutMs: 10_000 })
-  await note($, OFFER_NOTE)
+  await dbg($, 'setup offer pending for the first reply')
+}
+
+// Set at session.start in a conversation with no turns; shown when the first main-thread turn ends.
+let offerPending = false
+
+async function showOffer($: any) {
+  if (!offerPending) return
+  offerPending = false
+  if (await setupRecord($)) return
+  await writeSetupRecord($, { via: 'offer' })
+  $.ui.log(OFFER_LINE)
   await dbg($, 'setup offered')
 }
 
@@ -1445,6 +1458,7 @@ export const register: Register = (on, options) => {
     }
     const ended = await $.clock.now()
     await update($, tu, () => ({ running: false, endedAt: ended }))
+    await showOffer($).catch((err: any) => $.ui.log(`${PLUGIN}: the setup offer failed: ${errText(err)}`, { to: 'debug' }))
     await ensureWindow($)
     const s = await read($, st)
     const tokens = (await $.session.usage()).context.tokens ?? 0

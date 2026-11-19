@@ -1,6 +1,6 @@
 {
   "name": "last-words",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Claude-managed compaction: Claude requests compaction at a prepared handoff point; the mod snapshots the transcript, compacts, and resumes Claude with its handoff files. Setup tailors the strategy and thresholds to how you work.",
   "author": {
     "name": "Derek Law"

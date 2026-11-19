@@ -23,9 +23,8 @@ The setup tools (`setup_scan`, `setup_sample`, `setup_save`) may need loading th
 
 ## 1. Offer
 
-The mod asks you once, in the first session after install, to offer setup in one line after you finish the user's first request.
-Make the offer then and never before; do not repeat it.
-If the user says yes, or runs `/last-words setup`, or asks to tailor compaction, continue here.
+The mod itself offers setup once, as a line after your first reply in the first session after install; you need not offer it.
+If the user accepts that offer, runs `/last-words setup`, or asks to tailor compaction, continue here.
 
 ## 2. Ask before reading anything
 
